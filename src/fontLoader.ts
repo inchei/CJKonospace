@@ -38,11 +38,13 @@ export function loadFont(buffer: ArrayBuffer, fileName: string): LoadedFont {
     } catch (e) {
       throw new Error(`"${fileName}" TTC 解包失败`, { cause: e });
     }
+  } else if (sig === 0x77384632) {
+    // 'wOF2' -- normally decompressed by src/woff2.ts before reaching here
+    throw new Error(`"${fileName}" WOFF2 解压失败`);
   } else if (
     sig !== 0x00010000 &&
     sig !== 0x4f54544f && // 'OTTO'
-    sig !== 0x774f4646 && // 'wOFF'
-    sig !== 0x77384632 // 'wOF2'
+    sig !== 0x774f4646 // 'wOFF'
   ) {
     throw new Error(
       `"${fileName}" 不是有效的 TTF/OTF/WOFF（签名 0x${sig.toString(16)}）`,

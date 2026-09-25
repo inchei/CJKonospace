@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["fonttools"]
+# dependencies = ["fonttools", "brotli"]
 # ///
 """Merge a monospace font (base) with a CJK font.
 

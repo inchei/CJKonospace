@@ -47,6 +47,9 @@ importers:
       tw-animate-css:
         specifier: ^1.4.0
         version: 1.4.0
+      woff2-encoder:
+        specifier: 3.0.0-beta.1
+        version: 3.0.0-beta.1
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1
@@ -1965,6 +1968,10 @@ packages:
     engines: {node: '>= 8'}
     hasBin: true
 
+  woff2-encoder@3.0.0-beta.1:
+    resolution: {integrity: sha512-OtKJpjJkwU2p38rdmQa71jzYXODz0GXC8smKYAbKjjLbhOq4BbGU4R47KkWIrXN7U2in7O+uAW/f0+/xTzJ89A==}
+    engines: {node: '>= 22.12'}
+
   word-wrap@1.2.5:
     resolution: {integrity: sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==}
     engines: {node: '>=0.10.0'}
@@ -3608,6 +3615,8 @@ snapshots:
   which@2.0.2:
     dependencies:
       isexe: 2.0.0
+
+  woff2-encoder@3.0.0-beta.1: {}
 
   word-wrap@1.2.5: {}
 

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import "@/lib/i18n";
 import { loadFont, type LoadedFont } from "@/fontLoader";
+import { isWoff2, toSfnt } from "@/woff2";
 import { DEFAULT_PARAMS, type Params } from "@/params";
 import { renderPreview } from "@/preview";
 import { ensureShaping, shapeMonoRun } from "@/shaper";
@@ -206,6 +207,8 @@ interface SlotState {
   font: LoadedFont | null;
   error: string | null;
   busy: boolean;
+  /** overrides the generic "downloading" label while busy (e.g. woff2 dependency) */
+  busyLabel: string | null;
 }
 
 export default function App() {
@@ -222,11 +225,13 @@ export default function App() {
     font: null,
     error: null,
     busy: false,
+    busyLabel: null,
   });
   const [mono, setMono] = useState<SlotState>({
     font: null,
     error: null,
     busy: false,
+    busyLabel: null,
   });
   const [params, setParams] = useState<Params>(() => ({
     ...DEFAULT_PARAMS,
@@ -374,38 +379,53 @@ export default function App() {
     });
   }, []);
 
-  function setSlot(slot: "cjk" | "mono", file: File | undefined) {
+  async function setSlot(slot: "cjk" | "mono", file: File | undefined) {
     if (!file) return;
     const setter = slot === "cjk" ? setCjk : setMono;
     setGen({ status: "idle" });
-    file
-      .arrayBuffer()
-      .then((buf) =>
-        setter({ font: loadFont(buf, file.name), error: null, busy: false }),
-      )
-      .catch((e: Error) =>
-        setter({ font: null, error: e.message, busy: false }),
-      );
+    setter((s) => ({ ...s, busy: true, busyLabel: null, error: null }));
+    try {
+      const buf = await file.arrayBuffer();
+      if (isWoff2(buf)) {
+        setter((s) => ({ ...s, busyLabel: t("load.woff2") }));
+      }
+      const sfnt = await toSfnt(buf);
+      setter({
+        font: loadFont(sfnt, file.name),
+        error: null,
+        busy: false,
+        busyLabel: null,
+      });
+    } catch (e) {
+      setter({
+        font: null,
+        error: (e as Error).message,
+        busy: false,
+        busyLabel: null,
+      });
+    }
   }
 
   /** Download a monospace preset (same sources as syntaxFont) through the shared loadFont path */
   async function downloadPreset(slot: "cjk" | "mono", preset: MonoPreset) {
     const setter = slot === "cjk" ? setCjk : setMono;
     setGen({ status: "idle" });
-    setter((s) => ({ ...s, busy: true, error: null }));
+    setter((s) => ({ ...s, busy: true, busyLabel: null, error: null }));
     try {
       const res = await fetch(preset.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buf = await res.arrayBuffer();
       setter({
-        font: loadFont(buf, `${preset.family}.ttf`),
+        font: loadFont(await toSfnt(buf), `${preset.family}.ttf`),
         error: null,
         busy: false,
+        busyLabel: null,
       });
     } catch (e) {
       setter((s) => ({
         ...s,
         busy: false,
+        busyLabel: null,
         error: `${t("load.downloadFailed")} (${preset.family}: ${(e as Error).message})`,
       }));
     }
@@ -775,7 +795,7 @@ function FontSlotInfo({
           color: "#0a0a0a",
         }}
       >
-        {slot.busy ? (downloadingLabel ?? "…") : label}
+        {slot.busy ? (slot.busyLabel ?? downloadingLabel ?? "…") : label}
         <input
           type="file"
           accept=".ttf,.otf,.ttc,.woff,.woff2"
@@ -803,7 +823,7 @@ function FontSlotInfo({
           >
             <option value="" disabled>
               {slot.busy
-                ? (downloadingLabel ?? "…")
+                ? (slot.busyLabel ?? downloadingLabel ?? "…")
                 : (presetPlaceholder ?? "…")}
             </option>
             {presets.map((p) => (

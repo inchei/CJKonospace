@@ -17,7 +17,10 @@ pnpm build    # production build (dist/)
 ## How it works
 
 - **Parsing & preview** — [opentype.js](https://opentype.js.org/) parses both fonts and the Canvas renderer lays out the mixed lines; [harfbuzzjs](https://github.com/harfbuzz/harfbuzzjs) (WASM) runs real GSUB shaping so mono ligatures show up in the preview.
+- **WOFF2 input** — WOFF2 files are decompressed with [woff2-encoder](https://github.com/itskyedo/woff2-encoder) (WASM) before opentype.js sees them.
 - **Generation** — the same `wasm/merge_font.py` runs in the browser inside [pyodide](https://pyodide.org/) (WASM), with [fontTools](https://fonttools.readthedocs.io/) loaded from a CDN, so no server round-trip is needed.
+
+Three WASM modules, all lazy-loaded (only fetched when first used): harfbuzzjs (~0.4 MB) for shaping, woff2-encoder (~0.27 MB) for WOFF2 input, and pyodide + fontTools (~10 MB) for font generation. Python at runtime has no dependency on the WASM path — see the command line section below.
 
 ## Command line
 
@@ -50,6 +53,7 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
 
 Notes:
 
+- Inputs may be TTF, OTF or WOFF2 (WOFF2 is decompressed first; the CLI declares the `brotli` dependency for this).
 - Output is always TrueType (`glyf`). A CFF/OTF mono base is converted (cu2qu; CFF hinting is dropped).
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.
 - Vertical metrics (`hhea` ascent/descent, `OS/2` typo + win metrics) are recomputed to cover every glyph, so tall CJK glyphs are not clipped.
