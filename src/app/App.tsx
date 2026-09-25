@@ -789,7 +789,7 @@ export default function App() {
           </Card>
         </div>
 
-        <Card className="relative self-start overflow-hidden p-0">
+        <Card className="sticky top-0 self-start overflow-hidden p-0">
           <div className="max-h-[80vh] overflow-auto p-3">
             <canvas ref={canvasRef} className="block" />
           </div>
