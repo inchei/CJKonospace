@@ -275,6 +275,26 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         base["OS/2"].panose.bProportion = 9  # monospace
         base["OS/2"].xAvgCharWidth = round(mono_ref_adv * mono_adv_mul)
 
+    # --- gasp: let Windows grid-fit/antialias mixed hinted/unhinted glyphs ---
+    if "gasp" not in base:
+        from fontTools.ttLib import newTable
+        from fontTools.ttLib.tables._g_a_s_p import (
+            GASP_DOGRAY,
+            GASP_GRIDFIT,
+            GASP_SYMMETRIC_GRIDFIT,
+            GASP_SYMMETRIC_SMOOTHING,
+        )
+
+        gasp = newTable("gasp")
+        gasp.version = 1
+        gasp.gaspRange = {
+            0xFFFF: GASP_SYMMETRIC_GRIDFIT
+            | GASP_SYMMETRIC_SMOOTHING
+            | GASP_DOGRAY
+            | GASP_GRIDFIT
+        }
+        base["gasp"] = gasp
+
     report("save")
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
