@@ -12,11 +12,13 @@ import copy
 import json
 import sys
 
+from fontTools.misc.roundTools import otRound
 from fontTools.misc.transform import Transform
 from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
+from fontTools.ttLib.tables._g_l_y_f import Glyph
 
 
 def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem):
@@ -70,28 +72,46 @@ def _to_glyf(font, upem):
 
 
 def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
-    """Copy a glyf glyph and transform the copy.
+    """Build a transformed copy of a glyf glyph.
 
     The source glyph must not be mutated: several codepoints can share one
-    glyph, and mutating it in place would scale it once per codepoint.
-    Returns None for composites, which the caller redraws with a pen.
+    glyph, and mutating it in place would scale it once per codepoint. Only the
+    fields compile() reads are copied (no deepcopy of the raw data), and scale +
+    translate are done in a single pass. Returns None for composites, which the
+    caller redraws with a pen.
     """
-    g = copy.deepcopy(src_glyf[name])
+    g = src_glyf[name]
     g.expand(src_glyf)
     if not hasattr(g, "coordinates"):
-        return g
+        empty = Glyph()  # empty glyph (no contours)
+        empty.numberOfContours = 0
+        return empty
     if g.isComposite():
         if sx == 1 and sy == 1:
-            for comp in g.components:
+            new = copy.deepcopy(g)
+            for comp in new.components:
                 comp.x += dx
                 comp.y += dy
-            g.recalcBounds(src_glyf)
-            return g
+            new.recalcBounds(src_glyf)
+            return new
         return None
-    g.coordinates.scale((sx, sy))
-    g.coordinates.translate((dx, dy))
-    g.recalcBounds(src_glyf)
-    return g
+    new = Glyph()
+    new.numberOfContours = g.numberOfContours
+    new.endPtsOfContours = list(g.endPtsOfContours)
+    new.flags = list(g.flags)
+    new.coordinates = g.coordinates.copy()
+    if hasattr(g, "program"):
+        new.program = g.program
+    a = new.coordinates._a
+    xmin = 1e30
+    for i in range(0, len(a), 2):
+        x = a[i] * sx + dx
+        a[i] = x
+        a[i + 1] = a[i + 1] * sy + dy
+        if x < xmin:
+            xmin = x
+    new.xMin = otRound(xmin)
+    return new
 
 
 def merge(mono_path, cjk_path, out_path, params, progress=None):
@@ -237,7 +257,8 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         nt.setName(val, nid, 1, 0, 0)
 
     report("save")
-    base.save(out_path)
+    # skip the table-reordering pass (it rewrites the whole file once more)
+    base.save(out_path, reorderTables=None)
     return {"added": added, "upem": upem}
 
 
