@@ -735,7 +735,7 @@ export default function App() {
                     href={gen.url}
                     download={gen.fileName}
                     className={cn(
-                      buttonVariants({ variant: "reverse", size: "sm" }),
+                      buttonVariants({ variant: "neutral", size: "sm" }),
                       "w-full break-all",
                       WRAP_BTN,
                     )}
