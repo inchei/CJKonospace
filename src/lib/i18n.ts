@@ -24,6 +24,7 @@ const zhHant = {
     downloading: "下載中…",
     downloadFailed: "下載失敗，請手動上傳",
     woff2: "下載 WOFF2 解壓依賴…",
+    ttcFace: "TTC 子字體",
   },
   params: {
     title: "參數",
@@ -109,6 +110,7 @@ void i18next
             downloading: "下载中…",
             downloadFailed: "下载失败，请手动上传",
             woff2: "下载 WOFF2 解压依赖…",
+            ttcFace: "TTC 子字体",
           },
           params: {
             title: "参数",
@@ -172,6 +174,7 @@ void i18next
             downloading: "ダウンロード中…",
             downloadFailed: "ダウンロード失敗、手動でアップロードしてください",
             woff2: "WOFF2 解凍ライブラリを取得中…",
+            ttcFace: "TTC フェイス",
           },
           params: {
             title: "パラメータ",
@@ -239,6 +242,7 @@ void i18next
             downloading: "다운로드 중…",
             downloadFailed: "다운로드 실패, 직접 업로드하세요",
             woff2: "WOFF2 해제 라이브러리 내려받는 중…",
+            ttcFace: "TTC 페이스",
           },
           params: {
             title: "매개변수",

@@ -38,8 +38,8 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
   "styleName": "Regular",
   "lineHeight": 1.3,
   "format": "ttf",
-  "mono": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0 },
-  "cjk": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0 }
+  "mono": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0, "ttcIndex": 0 },
+  "cjk": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0, "ttcIndex": 0 }
 }
 ```
 
@@ -52,10 +52,12 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
 | `mono` / `cjk.advMul`     | advance multiplier                                                                        |
 | `mono` / `cjk.gsx`, `gsy` | outline scale (glyph width / height), advance untouched                                   |
 | `mono` / `cjk.baseline`   | baseline offset in px (see `fs`)                                                          |
+| `mono` / `cjk.ttcIndex`   | face index when the input is a `.ttc` collection (default `0`)                            |
 
 Notes:
 
 - Inputs may be TTF, OTF or WOFF2 (WOFF2 is decompressed first; the CLI declares the `brotli` dependency for this).
+- TTC collections are supported: pick a face with `ttcIndex` (default `0`). The web UI shows a face selector for multi-face collections and defaults to the face matching the UI language (e.g. `TC` for `zh-Hant`).
 - Output outlines are always TrueType (`glyf`); set `format: "woff2"` to get a WOFF2 package of the same font. A CFF/OTF mono base is converted (cu2qu; CFF hinting is dropped).
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.
 - Vertical metrics (`hhea` ascent/descent, `OS/2` typo + win metrics) are recomputed to cover every glyph, so tall CJK glyphs are not clipped.

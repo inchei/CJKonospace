@@ -143,8 +143,9 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     cjk_bl = float(cp.get("baseline", 0))
 
     report("load")
-    base = TTFont(mono_path)
-    cjk = TTFont(cjk_path)
+    # ttcIndex picks a face when the input is a TrueType Collection (ignored otherwise)
+    base = TTFont(mono_path, fontNumber=int(mp.get("ttcIndex", 0)))
+    cjk = TTFont(cjk_path, fontNumber=int(cp.get("ttcIndex", 0)))
     upem = base["head"].unitsPerEm
     if "glyf" not in base:
         # OTF / CFF (incl. CFF-based TTC) base: convert outlines to glyph

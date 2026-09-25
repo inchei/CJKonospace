@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import "@/lib/i18n";
 import { loadFont, type LoadedFont } from "@/fontLoader";
 import { isWoff2, toSfnt, toWoff2 } from "@/woff2";
+import { inspectTTC, isTTC, type TTCFace } from "@/ttc";
 import { DEFAULT_PARAMS, type Params } from "@/params";
 import { renderPreview } from "@/preview";
 import { ensureShaping, shapeMonoRun } from "@/shaper";
@@ -209,6 +210,33 @@ interface SlotState {
   busy: boolean;
   /** overrides the generic "downloading" label while busy (e.g. woff2 dependency) */
   busyLabel: string | null;
+  /** set when the chosen file was a TTC, so the face can be switched later */
+  ttc: {
+    buffer: ArrayBuffer;
+    fileName: string;
+    faces: TTCFace[];
+    index: number;
+  } | null;
+}
+
+/** Prefer the TTC face matching the UI language (Noto CJK ships JP/KR/SC/TC/HK). */
+function pickTtcFace(faces: TTCFace[], lang: string): number {
+  const token = lang.startsWith("zh-Hant")
+    ? "TC"
+    : lang.startsWith("zh-Hans")
+      ? "SC"
+      : lang.startsWith("ja")
+        ? "JP"
+        : lang.startsWith("ko")
+          ? "KR"
+          : "";
+  if (token) {
+    const found = faces.find((f) =>
+      new RegExp(`(^|[^A-Za-z])${token}($|[^A-Za-z])`).test(f.family),
+    );
+    if (found) return found.index;
+  }
+  return faces[0]?.index ?? 0;
 }
 
 export default function App() {
@@ -226,12 +254,14 @@ export default function App() {
     error: null,
     busy: false,
     busyLabel: null,
+    ttc: null,
   });
   const [mono, setMono] = useState<SlotState>({
     font: null,
     error: null,
     busy: false,
     busyLabel: null,
+    ttc: null,
   });
   const [params, setParams] = useState<Params>(() => ({
     ...DEFAULT_PARAMS,
@@ -284,12 +314,14 @@ export default function App() {
         gsx: params.monoGlyphScale,
         gsy: params.monoGlyphScaleY,
         baseline: params.monoBaselineOffset,
+        ttcIndex: mono.ttc?.index ?? 0,
       },
       cjk: {
         advMul: params.cjkAdvMul,
         gsx: params.cjkGlyphScale,
         gsy: params.cjkGlyphScaleY,
         baseline: params.cjkBaselineOffset,
+        ttcIndex: cjk.ttc?.index ?? 0,
       },
     };
   }
@@ -419,19 +451,50 @@ export default function App() {
         setter((s) => ({ ...s, busyLabel: t("load.woff2") }));
       }
       const sfnt = await toSfnt(buf);
-      setter({
-        font: loadFont(sfnt, file.name),
-        error: null,
-        busy: false,
-        busyLabel: null,
-      });
+      if (isTTC(sfnt)) {
+        const faces = inspectTTC(sfnt);
+        const index = pickTtcFace(faces, lang);
+        setter({
+          font: loadFont(sfnt, file.name, index),
+          error: null,
+          busy: false,
+          busyLabel: null,
+          ttc: { buffer: sfnt, fileName: file.name, faces, index },
+        });
+      } else {
+        setter({
+          font: loadFont(sfnt, file.name),
+          error: null,
+          busy: false,
+          busyLabel: null,
+          ttc: null,
+        });
+      }
     } catch (e) {
       setter({
         font: null,
         error: (e as Error).message,
         busy: false,
         busyLabel: null,
+        ttc: null,
       });
+    }
+  }
+
+  /** Re-unpack a loaded TTC with another face selected. */
+  function setSlotFace(slot: "cjk" | "mono", index: number) {
+    const setter = slot === "cjk" ? setCjk : setMono;
+    const source = (slot === "cjk" ? cjk : mono).ttc;
+    if (!source) return;
+    try {
+      setter((s) => ({
+        ...s,
+        font: loadFont(source.buffer, source.fileName, index),
+        ttc: { ...source, index },
+        error: null,
+      }));
+    } catch (e) {
+      setter((s) => ({ ...s, error: (e as Error).message }));
     }
   }
 
@@ -449,6 +512,7 @@ export default function App() {
         error: null,
         busy: false,
         busyLabel: null,
+        ttc: null,
       });
     } catch (e) {
       setter((s) => ({
@@ -560,6 +624,8 @@ export default function App() {
                 onFile={(f) => setSlot("cjk", f)}
                 emptyLabel={t("load.empty")}
                 vfNote={t("vfNote")}
+                ttcLabel={t("load.ttcFace")}
+                onTtcFace={(i) => setSlotFace("cjk", i)}
               />
               <FontSlotInfo
                 label={t("load.mono")}
@@ -568,6 +634,8 @@ export default function App() {
                 onFile={(f) => setSlot("mono", f)}
                 emptyLabel={t("load.empty")}
                 vfNote={t("vfNote")}
+                ttcLabel={t("load.ttcFace")}
+                onTtcFace={(i) => setSlotFace("mono", i)}
                 presetLabel={t("load.preset")}
                 presetPlaceholder={t("load.presetPlaceholder")}
                 downloadingLabel={t("load.downloading")}
@@ -806,6 +874,8 @@ function FontSlotInfo({
   onFile,
   emptyLabel,
   vfNote,
+  ttcLabel,
+  onTtcFace,
   presets,
   presetLabel,
   presetPlaceholder,
@@ -818,6 +888,8 @@ function FontSlotInfo({
   onFile: (f: File | undefined) => void;
   emptyLabel: string;
   vfNote: string;
+  ttcLabel?: string;
+  onTtcFace?: (index: number) => void;
   presets?: MonoPreset[];
   presetLabel?: string;
   presetPlaceholder?: string;
@@ -850,6 +922,25 @@ function FontSlotInfo({
           }}
         />
       </label>
+      {slot.ttc && slot.ttc.faces.length > 1 && (
+        <label className="flex flex-col gap-1 text-xs font-base">
+          <span className="font-heading">{ttcLabel}</span>
+          <select
+            className="w-full min-w-0 rounded-base border-2 border-border bg-secondary-background px-2 py-1.5 text-xs font-base shadow-shadow disabled:opacity-50"
+            value={slot.ttc.index}
+            disabled={slot.busy}
+            onChange={(e) => onTtcFace?.(Number(e.target.value))}
+            aria-label={ttcLabel}
+          >
+            {slot.ttc.faces.map((f) => (
+              <option key={f.index} value={f.index}>
+                {f.family}
+                {f.style ? ` · ${f.style}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {presets && onPreset && (
         <label className="flex flex-col gap-1 text-xs font-base">
           <span className="font-heading">{presetLabel}</span>

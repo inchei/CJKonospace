@@ -1,13 +1,95 @@
-/** opentype.js cannot parse ttc; unpack the first face into a plain sfnt buffer. */
-export function unwrapTTC(buffer: ArrayBuffer): {
+const TTC_TAG = 0x74746366; // 'ttcf'
+const NAME_TAG = 0x6e616d65; // 'name'
+
+export interface TTCFace {
+  index: number;
+  family: string;
+  style: string;
+}
+
+export function isTTC(buffer: ArrayBuffer): boolean {
+  return new DataView(buffer).getUint32(0) === TTC_TAG;
+}
+
+function ttcFaceCount(buffer: ArrayBuffer): number {
+  return new DataView(buffer).getUint32(8);
+}
+
+/** Read nameID 1/2 out of a face's `name` table without parsing its glyphs. */
+function readFaceName(
+  buffer: ArrayBuffer,
+  faceOffset: number,
+): { family: string; style: string } {
+  const view = new DataView(buffer);
+  const numTables = view.getUint16(faceOffset + 4);
+  let nameOff = 0;
+  for (let i = 0; i < numTables; i++) {
+    const rec = faceOffset + 12 + i * 16;
+    if (view.getUint32(rec) === NAME_TAG) {
+      nameOff = view.getUint32(rec + 8);
+      break;
+    }
+  }
+  if (!nameOff) return { family: "", style: "" };
+
+  const count = view.getUint16(nameOff + 2);
+  const stringOffset = view.getUint16(nameOff + 4);
+  let family = "";
+  let style = "";
+  for (let i = 0; i < count; i++) {
+    const rec = nameOff + 6 + i * 12;
+    const platformID = view.getUint16(rec);
+    const languageID = view.getUint16(rec + 4);
+    const nameID = view.getUint16(rec + 6);
+    if (nameID !== 1 && nameID !== 2) continue;
+    if (platformID !== 3 && platformID !== 1) continue;
+    // Windows/English (0x409) or Macintosh/English (0)
+    if (platformID === 3 ? languageID !== 0x409 : languageID !== 0) continue;
+    const length = view.getUint16(rec + 8);
+    const start = nameOff + stringOffset + view.getUint16(rec + 10);
+    const bytes = new Uint8Array(buffer, start, length);
+    let text: string;
+    try {
+      text = new TextDecoder(
+        platformID === 3 ? "utf-16be" : "macintosh",
+      ).decode(bytes);
+    } catch {
+      continue; // label unsupported here; skip rather than fail the whole TTC
+    }
+    if (nameID === 1 && !family) family = text;
+    else if (nameID === 2 && !style) style = text;
+  }
+  return { family, style };
+}
+
+/** List every face in a TTC (family/style only, applies to All/English name records). */
+export function inspectTTC(buffer: ArrayBuffer): TTCFace[] {
+  if (!isTTC(buffer)) throw new Error("not a ttc");
+  const view = new DataView(buffer);
+  const count = ttcFaceCount(buffer);
+  const faces: TTCFace[] = [];
+  for (let i = 0; i < count; i++) {
+    const { family, style } = readFaceName(buffer, view.getUint32(12 + i * 4));
+    faces.push({ index: i, family: family || `face ${i}`, style });
+  }
+  return faces;
+}
+
+/** Unpack the face at `index` into a plain sfnt buffer (opentype.js cannot parse ttc). */
+export function unwrapTTC(
+  buffer: ArrayBuffer,
+  index = 0,
+): {
   sfnt: ArrayBuffer;
   numFonts: number;
 } {
   const view = new DataView(buffer);
   const magic = view.getUint32(0);
-  if (magic !== 0x74746366) throw new Error("not a ttc");
-  const numFonts = view.getUint32(8);
-  const dirOffset = view.getUint32(12 + 0);
+  if (magic !== TTC_TAG) throw new Error("not a ttc");
+  const numFonts = ttcFaceCount(buffer);
+  if (index < 0 || index >= numFonts)
+    throw new Error(`ttc face ${index} out of range (0-${numFonts - 1})`);
+  const dirOffset = view.getUint32(12 + index * 4);
   const sfntVersion = view.getUint32(dirOffset);
   const numTables = view.getUint16(dirOffset + 4);
   // new buffer: 12-byte header + 16*n directory + table data

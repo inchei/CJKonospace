@@ -1,12 +1,14 @@
 import ot from "opentype.js";
 import type { Font } from "opentype.js";
 import type { FontMeta } from "./types";
-import { unwrapTTC } from "./ttc.ts";
+import { inspectTTC, isTTC, unwrapTTC, type TTCFace } from "./ttc.ts";
 
 export interface LoadedFont {
   buffer: ArrayBuffer;
   font: Font;
   meta: FontMeta;
+  /** present when the source file was a TTC (multiple faces) */
+  ttc?: { faces: TTCFace[]; index: number };
 }
 
 function readNames(font: Font): { family: string; style: string } {
@@ -25,16 +27,18 @@ function readNames(font: Font): { family: string; style: string } {
   return { family: "", style: "" };
 }
 
-export function loadFont(buffer: ArrayBuffer, fileName: string): LoadedFont {
+export function loadFont(
+  buffer: ArrayBuffer,
+  fileName: string,
+  ttcIndex = 0,
+): LoadedFont {
   let buffer2 = buffer;
   const sig = new DataView(buffer).getUint32(0);
-  let numFonts = 1;
-  if (sig === 0x74746366) {
-    // 'ttcf' signature
+  let ttc: LoadedFont["ttc"];
+  if (isTTC(buffer)) {
     try {
-      const unwrapped = unwrapTTC(buffer);
-      buffer2 = unwrapped.sfnt;
-      numFonts = unwrapped.numFonts;
+      ttc = { faces: inspectTTC(buffer), index: ttcIndex };
+      buffer2 = unwrapTTC(buffer, ttcIndex).sfnt;
     } catch (e) {
       throw new Error(`"${fileName}" TTC 解包失败`, { cause: e });
     }
@@ -69,12 +73,5 @@ export function loadFont(buffer: ArrayBuffer, fileName: string): LoadedFont {
     descender: font.descender || 0,
     isVariable: "fvar" in font.tables,
   };
-  return {
-    buffer: buffer2,
-    font,
-    meta: {
-      ...meta,
-      fileName: `${fileName}${numFonts > 1 ? `（ttc 含 ${numFonts} 字体，取第 1 个）` : ""}`,
-    },
-  };
+  return { buffer: buffer2, font, meta, ttc };
 }
