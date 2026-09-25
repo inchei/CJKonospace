@@ -1,6 +1,7 @@
 import mergePy from "@/lib/mergeScript";
 
-const PYODIDE_VERSION = "0.27.7";
+// 0.28+ ships fontTools >= 4.55, which can instance CFF2 variable fonts
+const PYODIDE_VERSION = "0.29.3";
 const PYODIDE_BASE = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 
 interface Request {
