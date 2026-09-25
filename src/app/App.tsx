@@ -740,7 +740,7 @@ export default function App() {
                       WRAP_BTN,
                     )}
                   >
-                    {t("gen.download")} · {gen.fileName}
+                    {t("gen.download")}
                   </a>
                   <Button
                     className={WRAP_BTN}
