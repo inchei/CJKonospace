@@ -267,6 +267,14 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         nt.setName(val, nid, 3, 1, 0x409)
         nt.setName(val, nid, 1, 0, 0)
 
+    # --- monospace metadata: terminals/editors rely on these flags ---
+    report("metrics")
+    if "post" in base:
+        base["post"].isFixedPitch = 1
+    if "OS/2" in base:
+        base["OS/2"].panose.bProportion = 9  # monospace
+        base["OS/2"].xAvgCharWidth = round(mono_ref_adv * mono_adv_mul)
+
     report("save")
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
