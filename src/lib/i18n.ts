@@ -25,6 +25,7 @@ const zhHant = {
     downloadFailed: "下載失敗，請手動上傳",
     woff2: "下載 WOFF2 解壓依賴…",
     ttcFace: "TTC 子字體",
+    instance: "內建實例",
   },
   params: {
     title: "參數",
@@ -52,6 +53,7 @@ const zhHant = {
     downloading: "首次需下載執行環境（約 10MB）…",
     stageRuntime: "載入 pyodide 執行環境…",
     stagePackages: "載入 fontTools…",
+    stageInstance: "套用可變字體實例…",
     stageMerge: "合併字體中（大字集較久）…",
     stageConvert: "轉換輪廓格式…",
     stageCmap: "合併字元對應表 (cmap)…",
@@ -111,6 +113,7 @@ void i18next
             downloadFailed: "下载失败，请手动上传",
             woff2: "下载 WOFF2 解压依赖…",
             ttcFace: "TTC 子字体",
+            instance: "内置实例",
           },
           params: {
             title: "参数",
@@ -138,6 +141,7 @@ void i18next
             downloading: "首次需下载运行环境（约 10MB）…",
             stageRuntime: "加载 pyodide 运行环境…",
             stagePackages: "加载 fontTools…",
+            stageInstance: "应用可变字体实例…",
             stageMerge: "合并字体中（大字集较慢）…",
             stageConvert: "转换轮廓格式…",
             stageCmap: "合并字符映射表 (cmap)…",
@@ -175,6 +179,7 @@ void i18next
             downloadFailed: "ダウンロード失敗、手動でアップロードしてください",
             woff2: "WOFF2 解凍ライブラリを取得中…",
             ttcFace: "TTC フェイス",
+            instance: "組み込みインスタンス",
           },
           params: {
             title: "パラメータ",
@@ -206,6 +211,7 @@ void i18next
             downloading: "初回は実行環境（約 10MB）をダウンロードします…",
             stageRuntime: "pyodide を読み込み中…",
             stagePackages: "fontTools を読み込み中…",
+            stageInstance: "可変フォントのインスタンスを適用中…",
             stageMerge: "フォントを結合中（大字集は時間がかかります）…",
             stageConvert: "輪郭形式を変換中…",
             stageCmap: "cmap を統合中…",
@@ -243,6 +249,7 @@ void i18next
             downloadFailed: "다운로드 실패, 직접 업로드하세요",
             woff2: "WOFF2 해제 라이브러리 내려받는 중…",
             ttcFace: "TTC 페이스",
+            instance: "내장 인스턴스",
           },
           params: {
             title: "매개변수",
@@ -270,6 +277,7 @@ void i18next
             downloading: "처음에는 실행 환경(약 10MB)을 내려받습니다…",
             stageRuntime: "pyodide 실행 환경 로드 중…",
             stagePackages: "fontTools 로드 중…",
+            stageInstance: "가변 폰트 인스턴스 적용 중…",
             stageMerge: "폰트 병합 중(큰 글자 집합은 오래 걸림)…",
             stageConvert: "윤곽선 형식 변환 중…",
             stageCmap: "cmap 병합 중…",

@@ -58,10 +58,25 @@ function getHbFont(font: LoadedFont): HbFont | null {
 export function shapeMonoRun(
   font: LoadedFont,
   text: string,
+  coords?: Record<string, number>,
 ): ShapedGlyph[] | null {
   const hbFont = getHbFont(font);
   if (!hbFont || !hbMod || text.length === 0) return null;
   try {
+    if (coords && Object.keys(coords).length > 0) {
+      // hb Font.setVariations exists at runtime but is missing from the typings
+      const Variation = (
+        hbMod as unknown as {
+          Variation: new (tag: string, value: number) => unknown;
+        }
+      ).Variation;
+      const variations = Object.entries(coords).map(
+        ([tag, value]) => new Variation(tag, value),
+      );
+      (
+        hbFont as unknown as { setVariations?: (v: unknown[]) => void }
+      ).setVariations?.(variations);
+    }
     const buffer = new hbMod.Buffer();
     buffer.addText(text);
     buffer.guessSegmentProperties();

@@ -12,6 +12,9 @@ export interface RenderInput {
   monoFont: LoadedFont | null;
   params: Params;
   overrides: Record<string, Override>;
+  /** variation-axis locations for variable fonts ({} = default instance) */
+  monoCoords?: Record<string, number>;
+  cjkCoords?: Record<string, number>;
   /**
    * Shape one mono-font run. Return null to fall back to per-char layout
    * (e.g. harfbuzz still loading). CJK runs are always laid out per char.
@@ -176,6 +179,24 @@ export function renderPreview(
 
   const fs = params.fontSize;
 
+  /** Apply a variable font's instance location to a glyph (opentype.js variation). */
+  function varied(font: LoadedFont, glyph: Glyph): Glyph {
+    const coords = font === cjkFont ? input.cjkCoords : input.monoCoords;
+    const manager = (
+      font.font as unknown as {
+        variation?: {
+          getTransform(g: Glyph, c?: Record<string, number>): Glyph;
+        };
+      }
+    ).variation;
+    if (!manager || !coords || Object.keys(coords).length === 0) return glyph;
+    try {
+      return manager.getTransform(glyph, coords);
+    } catch {
+      return glyph;
+    }
+  }
+
   // Vertical metrics, mirroring merge_font.py: the generated ascent/descent come
   // from both fonts' declared hhea ascender/descender (times lineHeight).
   const metricTop = Math.max(
@@ -222,7 +243,8 @@ export function renderPreview(
       advPx = fs / 2;
       natAdvPx = advPx;
     } else {
-      const g = font.font.charToGlyph(ch);
+      const raw = font.font.charToGlyph(ch);
+      const g = raw ? varied(font, raw) : raw;
       const aw =
         g && g.advanceWidth > 0 ? g.advanceWidth : font.meta.unitsPerEm / 2;
       natAdvPx = aw * (fs / font.meta.unitsPerEm);
@@ -381,7 +403,8 @@ export function renderPreview(
       // the glyph's own advance (e.g. 2:1-locked CJK in a 1.2em cell) stays centered
       const center = (info.advPx - info.natAdvPx * gsx) / 2;
       if (info.kind === "shaped" && font) {
-        const glyph = font.font.glyphs.get(info.gid);
+        const raw = font.font.glyphs.get(info.gid);
+        const glyph = raw ? varied(font, raw) : raw;
         if (glyph) {
           const scale = fs / font.meta.unitsPerEm;
           drawGlyph(
@@ -395,7 +418,8 @@ export function renderPreview(
           );
         }
       } else if (info.kind === "char") {
-        const glyph = font ? font.font.charToGlyph(info.ch) : undefined;
+        const raw = font ? font.font.charToGlyph(info.ch) : undefined;
+        const glyph = raw && font ? varied(font, raw) : undefined;
         if (glyph) {
           const scale = fs / font.meta.unitsPerEm;
           const bl =

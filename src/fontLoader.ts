@@ -3,12 +3,68 @@ import type { Font } from "opentype.js";
 import type { FontMeta } from "./types";
 import { inspectTTC, isTTC, unwrapTTC, type TTCFace } from "./ttc.ts";
 
+interface VariationAxis {
+  tag: string;
+  name: string;
+  min: number;
+  default: number;
+  max: number;
+}
+
+interface VariationInstance {
+  name: string;
+  coords: Record<string, number>;
+}
+
 export interface LoadedFont {
   buffer: ArrayBuffer;
   font: Font;
   meta: FontMeta;
   /** present when the source file was a TTC (multiple faces) */
   ttc?: { faces: TTCFace[]; index: number };
+  /** present when the font has an fvar table (variable font) */
+  variation?: { axes: VariationAxis[]; instances: VariationInstance[] };
+}
+
+/** fvar names are localized maps; prefer English, else the first available. */
+function enName(names?: Record<string, string>): string {
+  if (!names) return "";
+  return names.en ?? Object.values(names)[0] ?? "";
+}
+
+/** Read fvar axes/instances into a browser-friendly shape, or undefined. */
+function readVariation(font: Font): LoadedFont["variation"] {
+  const fvar = (
+    font.tables as unknown as {
+      fvar?: {
+        axes?: {
+          tag: string;
+          minValue: number;
+          defaultValue: number;
+          maxValue: number;
+          name?: Record<string, string>;
+        }[];
+        instances?: {
+          name?: Record<string, string>;
+          coordinates: Record<string, number>;
+        }[];
+      };
+    }
+  ).fvar;
+  if (!fvar?.axes?.length) return undefined;
+  return {
+    axes: fvar.axes.map((a) => ({
+      tag: a.tag,
+      name: enName(a.name) || a.tag,
+      min: a.minValue,
+      default: a.defaultValue,
+      max: a.maxValue,
+    })),
+    instances: (fvar.instances ?? []).map((inst) => ({
+      name: enName(inst.name),
+      coords: { ...inst.coordinates },
+    })),
+  };
 }
 
 function readNames(font: Font): { family: string; style: string } {
@@ -64,6 +120,7 @@ export function loadFont(
     });
   }
   const names = readNames(font);
+  const variation = readVariation(font);
   const meta: FontMeta = {
     fileName,
     familyName: names.family || fileName,
@@ -71,7 +128,7 @@ export function loadFont(
     unitsPerEm: font.unitsPerEm || 1000,
     ascender: font.ascender || 0,
     descender: font.descender || 0,
-    isVariable: "fvar" in font.tables,
+    isVariable: Boolean(variation),
   };
-  return { buffer: buffer2, font, meta, ttc };
+  return { buffer: buffer2, font, meta, ttc, variation };
 }

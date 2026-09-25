@@ -146,6 +146,18 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     # ttcIndex picks a face when the input is a TrueType Collection (ignored otherwise)
     base = TTFont(mono_path, fontNumber=int(mp.get("ttcIndex", 0)))
     cjk = TTFont(cjk_path, fontNumber=int(cp.get("ttcIndex", 0)))
+
+    # Pin variable fonts to a static instance before merging (no axis merging).
+    # An empty location means "use the axis defaults".
+    variations = params.get("variations") or {}
+    if "fvar" in base or "fvar" in cjk:
+        from fontTools.varLib.instancer import instantiateVariableFont
+
+        report("instance")
+        for tag, font in (("mono", base), ("cjk", cjk)):
+            if "fvar" in font:
+                instantiateVariableFont(font, variations.get(tag) or {}, inplace=True)
+
     upem = base["head"].unitsPerEm
     if "glyf" not in base:
         # OTF / CFF (incl. CFF-based TTC) base: convert outlines to glyph

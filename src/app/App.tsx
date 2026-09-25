@@ -217,6 +217,14 @@ interface SlotState {
     faces: TTCFace[];
     index: number;
   } | null;
+  /** current variation-axis values ({} for non-variable fonts) */
+  coords: Record<string, number>;
+}
+
+/** Default axis location of a variable font (one entry per axis). */
+function defaultCoords(v?: LoadedFont["variation"]): Record<string, number> {
+  if (!v) return {};
+  return Object.fromEntries(v.axes.map((a) => [a.tag, a.default]));
 }
 
 /** Prefer the TTC face matching the UI language (Noto CJK ships JP/KR/SC/TC/HK). */
@@ -255,6 +263,7 @@ export default function App() {
     busy: false,
     busyLabel: null,
     ttc: null,
+    coords: {},
   });
   const [mono, setMono] = useState<SlotState>({
     font: null,
@@ -262,6 +271,7 @@ export default function App() {
     busy: false,
     busyLabel: null,
     ttc: null,
+    coords: {},
   });
   const [params, setParams] = useState<Params>(() => ({
     ...DEFAULT_PARAMS,
@@ -323,6 +333,8 @@ export default function App() {
         baseline: params.cjkBaselineOffset,
         ttcIndex: cjk.ttc?.index ?? 0,
       },
+      // static instance location per font; {} means "keep as-is"
+      variations: { mono: mono.coords, cjk: cjk.coords },
     };
   }
 
@@ -415,7 +427,9 @@ export default function App() {
           monoFont: mono.font,
           params,
           overrides: {},
-          shapeMono: (font, text) => shapeMonoRun(font, text),
+          monoCoords: mono.coords,
+          cjkCoords: cjk.coords,
+          shapeMono: (font, text) => shapeMonoRun(font, text, mono.coords),
         },
         { showGrid, hint: t("previewHint") },
       );
@@ -451,25 +465,24 @@ export default function App() {
         setter((s) => ({ ...s, busyLabel: t("load.woff2") }));
       }
       const sfnt = await toSfnt(buf);
+      let font: LoadedFont;
+      let ttc: SlotState["ttc"] = null;
       if (isTTC(sfnt)) {
         const faces = inspectTTC(sfnt);
         const index = pickTtcFace(faces, lang);
-        setter({
-          font: loadFont(sfnt, file.name, index),
-          error: null,
-          busy: false,
-          busyLabel: null,
-          ttc: { buffer: sfnt, fileName: file.name, faces, index },
-        });
+        font = loadFont(sfnt, file.name, index);
+        ttc = { buffer: sfnt, fileName: file.name, faces, index };
       } else {
-        setter({
-          font: loadFont(sfnt, file.name),
-          error: null,
-          busy: false,
-          busyLabel: null,
-          ttc: null,
-        });
+        font = loadFont(sfnt, file.name);
       }
+      setter({
+        font,
+        error: null,
+        busy: false,
+        busyLabel: null,
+        ttc,
+        coords: defaultCoords(font.variation),
+      });
     } catch (e) {
       setter({
         font: null,
@@ -477,6 +490,7 @@ export default function App() {
         busy: false,
         busyLabel: null,
         ttc: null,
+        coords: {},
       });
     }
   }
@@ -487,15 +501,29 @@ export default function App() {
     const source = (slot === "cjk" ? cjk : mono).ttc;
     if (!source) return;
     try {
+      const font = loadFont(source.buffer, source.fileName, index);
       setter((s) => ({
         ...s,
-        font: loadFont(source.buffer, source.fileName, index),
+        font,
         ttc: { ...source, index },
+        coords: defaultCoords(font.variation),
         error: null,
       }));
     } catch (e) {
       setter((s) => ({ ...s, error: (e as Error).message }));
     }
+  }
+
+  /** Set one variation axis of a slot. */
+  function setAxis(slot: "cjk" | "mono", tag: string, value: number) {
+    const setter = slot === "cjk" ? setCjk : setMono;
+    setter((s) => ({ ...s, coords: { ...s.coords, [tag]: value } }));
+  }
+
+  /** Jump to a named instance (partial location merged onto the current axes). */
+  function setInstance(slot: "cjk" | "mono", coords: Record<string, number>) {
+    const setter = slot === "cjk" ? setCjk : setMono;
+    setter((s) => ({ ...s, coords: { ...s.coords, ...coords } }));
   }
 
   /** Download a monospace preset (same sources as syntaxFont) through the shared loadFont path */
@@ -513,6 +541,7 @@ export default function App() {
         busy: false,
         busyLabel: null,
         ttc: null,
+        coords: {},
       });
     } catch (e) {
       setter((s) => ({
@@ -530,6 +559,7 @@ export default function App() {
   function stageText(stage?: string) {
     if (stage === "runtime") return t("gen.stageRuntime");
     if (stage === "packages") return t("gen.stagePackages");
+    if (stage === "instance") return t("gen.stageInstance");
     if (stage === "convert") return t("gen.stageConvert");
     if (stage === "cjk") return t("gen.stageMerge");
     if (stage === "cmap") return t("gen.stageCmap");
@@ -626,6 +656,9 @@ export default function App() {
                 vfNote={t("vfNote")}
                 ttcLabel={t("load.ttcFace")}
                 onTtcFace={(i) => setSlotFace("cjk", i)}
+                instanceLabel={t("load.instance")}
+                onAxis={(tag, v) => setAxis("cjk", tag, v)}
+                onInstance={(c) => setInstance("cjk", c)}
               />
               <FontSlotInfo
                 label={t("load.mono")}
@@ -636,6 +669,9 @@ export default function App() {
                 vfNote={t("vfNote")}
                 ttcLabel={t("load.ttcFace")}
                 onTtcFace={(i) => setSlotFace("mono", i)}
+                instanceLabel={t("load.instance")}
+                onAxis={(tag, v) => setAxis("mono", tag, v)}
+                onInstance={(c) => setInstance("mono", c)}
                 presetLabel={t("load.preset")}
                 presetPlaceholder={t("load.presetPlaceholder")}
                 downloadingLabel={t("load.downloading")}
@@ -876,6 +912,9 @@ function FontSlotInfo({
   vfNote,
   ttcLabel,
   onTtcFace,
+  instanceLabel,
+  onAxis,
+  onInstance,
   presets,
   presetLabel,
   presetPlaceholder,
@@ -890,6 +929,9 @@ function FontSlotInfo({
   vfNote: string;
   ttcLabel?: string;
   onTtcFace?: (index: number) => void;
+  instanceLabel?: string;
+  onAxis?: (tag: string, value: number) => void;
+  onInstance?: (coords: Record<string, number>) => void;
   presets?: MonoPreset[];
   presetLabel?: string;
   presetPlaceholder?: string;
@@ -898,6 +940,15 @@ function FontSlotInfo({
 }) {
   const font = slot.font;
   const meta = font?.meta;
+  const variation = font?.variation;
+  const instanceIndex =
+    variation && variation.instances.length > 0
+      ? variation.instances.findIndex((inst) =>
+          variation.axes.every(
+            (a) => slot.coords[a.tag] === inst.coords[a.tag],
+          ),
+        )
+      : -1;
   return (
     <div className="flex flex-col gap-2">
       <label
@@ -988,6 +1039,56 @@ function FontSlotInfo({
             ? `${meta.familyName} ${meta.styleName ? `· ${meta.styleName}` : ""} · ${meta.unitsPerEm}upm${meta.isVariable ? ` · ${vfNote}` : ""}`
             : emptyLabel}
       </div>
+      {variation && variation.axes.length > 0 && (
+        <div className="flex flex-col gap-2 rounded-base border-2 border-border bg-secondary-background p-2">
+          {variation.instances.length > 0 && (
+            <label className="flex flex-col gap-1 text-xs font-base">
+              <span className="font-heading">{instanceLabel}</span>
+              <select
+                className="w-full min-w-0 rounded-base border-2 border-border bg-secondary-background px-2 py-1.5 text-xs font-base"
+                value={instanceIndex >= 0 ? String(instanceIndex) : ""}
+                disabled={slot.busy}
+                onChange={(e) => {
+                  const inst = variation.instances[Number(e.target.value)];
+                  if (inst) onInstance?.(inst.coords);
+                }}
+                aria-label={instanceLabel}
+              >
+                <option value="">—</option>
+                {variation.instances.map((inst, i) => (
+                  <option key={i} value={String(i)}>
+                    {inst.name || `#${i}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {variation.axes.map((axis) => {
+            const value = slot.coords[axis.tag] ?? axis.default;
+            return (
+              <div key={axis.tag} className="flex flex-col gap-1">
+                <div className="flex items-center justify-between text-xs font-base">
+                  <span>
+                    {axis.name} <span className="opacity-60">({axis.tag})</span>
+                  </span>
+                  <span>{Math.round(value * 1000) / 1000}</span>
+                </div>
+                <input
+                  type="range"
+                  className="w-full accent-black"
+                  min={axis.min}
+                  max={axis.max}
+                  step={Math.max((axis.max - axis.min) / 100, 0.001)}
+                  value={value}
+                  disabled={slot.busy}
+                  onChange={(e) => onAxis?.(axis.tag, Number(e.target.value))}
+                  aria-label={`${axis.name} (${axis.tag})`}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
