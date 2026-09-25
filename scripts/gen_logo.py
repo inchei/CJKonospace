@@ -5,17 +5,14 @@
 # ///
 """Generate the CJKonospace logo.
 
-字 (CJK) in its natural proportions, drawn as a hollow outline, split down the
-middle by a vertical dashed line, on a neobrutalist yellow tile (thick black
-border + hard offset shadow). The dashed seam marks the CJK : mono = 2 : 1
-column split.
+字 (CJK) in its natural proportions on a neobrutalist yellow tile (thick black
+border + hard offset shadow), split down the middle: the left half is solid
+black, the right half is inverted (a black panel with 字 knocked out).
 
 Font: Noto Sans CJK Bold (SIL OFL 1.1), auto-detected from common system paths.
 
-Requires only fontTools:  pip install fonttools
-
 Usage:
-    python scripts/gen_logo.py [--cjk PATH] [--out PATH]
+    uv run scripts/gen_logo.py [--cjk PATH] [--out PATH]
 """
 
 import argparse
@@ -38,11 +35,6 @@ INK = "#111111"
 TILE = "#FDC500"
 TILE_X, TILE_Y, TILE_SIZE, TILE_RING = 14.0, 14.0, 204.0, 10.0
 SHADOW_X, SHADOW_Y = 26.0, 26.0
-STROKE = 7.0
-# dashed seam that divides the whole tile, not just the glyph
-SEAM_W = 13.0
-SEAM_DASH = "24 16"
-SEAM_Y0, SEAM_Y1 = 27.0, 205.0
 
 
 def find_cjk() -> str:
@@ -73,6 +65,14 @@ def build(cjk_path: str) -> str:
 
     pen = SVGPathPen(gset)
     gset[name].draw(TransformPen(pen, t))
+    d = pen.getCommands()
+
+    # right half: a black panel (inside the tile border) with the glyph knocked out
+    seam = gcx
+    inner0 = TILE_X + TILE_RING / 2
+    inner1 = TILE_X + TILE_SIZE - TILE_RING / 2
+    panel_x, panel_y = seam, inner0
+    panel_w, panel_h = inner1 - seam, inner1 - inner0
 
     # tight viewBox around tile + shadow so the mark fills tab icons / <img> boxes
     pad = 1.0
@@ -86,6 +86,18 @@ def build(cjk_path: str) -> str:
   viewBox="{x0:.1f} {y0:.1f} {vw:.1f} {vh:.1f}"
   width="{vw:.0f}" height="{vh:.0f}" role="img" aria-label="CJKonospace">
   <title>CJKonospace</title>
+  <defs>
+    <clipPath id="leftHalf" clipPathUnits="userSpaceOnUse">
+      <rect x="{seam - 4000:.1f}" y="-4000" width="4000" height="8000"/>
+    </clipPath>
+    <mask id="rightKnockout" maskUnits="userSpaceOnUse"
+      x="{panel_x:.1f}" y="{panel_y:.1f}"
+      width="{panel_w:.1f}" height="{panel_h:.1f}">
+      <rect x="{panel_x:.1f}" y="{panel_y:.1f}"
+        width="{panel_w:.1f}" height="{panel_h:.1f}" fill="#fff"/>
+      <path d="{d}" fill="#000"/>
+    </mask>
+  </defs>
 
   <rect x="{SHADOW_X}" y="{SHADOW_Y}" width="{TILE_SIZE}"
     height="{TILE_SIZE}" rx="12" fill="{INK}"/>
@@ -93,17 +105,10 @@ def build(cjk_path: str) -> str:
     height="{TILE_SIZE}" rx="12" fill="{TILE}" stroke="{INK}"
     stroke-width="{TILE_RING}"/>
 
-  <path
-    d="{pen.getCommands()}"
-    fill="none"
-    stroke="{INK}"
-    stroke-width="{STROKE}"
-    stroke-linejoin="round"
-  />
-  <line
-    x1="{gcx}" y1="{SEAM_Y0}" x2="{gcx}" y2="{SEAM_Y1}"
-    stroke="{INK}" stroke-width="{SEAM_W}" stroke-dasharray="{SEAM_DASH}"
-  />
+  <path d="{d}" fill="{INK}" clip-path="url(#leftHalf)"/>
+  <rect x="{panel_x:.1f}" y="{panel_y:.1f}"
+    width="{panel_w:.1f}" height="{panel_h:.1f}"
+    fill="{INK}" mask="url(#rightKnockout)"/>
 </svg>
 """
 
