@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/export/mergeWorker.ts"],
+  "project": ["src/**/*.{ts,tsx}"],
+  // src/components/ui holds vendored registry components, used on demand
+  "ignore": ["src/components/ui/**"],
+  // invisible to knip: husky runs via git hooks, tw-animate-css via CSS @import
+  "ignoreDependencies": ["husky", "tw-animate-css"],
+  // uvx runs Ruff for the Python checks; it is an external (uv) binary
+  "ignoreBinaries": ["uvx"]
+}

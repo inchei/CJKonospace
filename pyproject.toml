@@ -1,0 +1,20 @@
+[tool.ruff]
+line-length = 88
+# pyodide 0.27 runs CPython 3.12; scripts run on system Python 3.10+
+target-version = "py312"
+extend-exclude = ["node_modules", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "SIM", # flake8-simplify
+]
+
+[tool.ruff.format]
+quote-style = "double"

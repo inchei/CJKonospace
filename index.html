@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="text-scale" content="scale" />
+    <title>CJKonospace</title>
+    <link rel="icon" type="image/svg+xml" href="logo.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Non-blocking load: media=print skips render blocking; if gstatic is unreachable, abandon webfonts after timeout and fall back to system fonts -->
+    <link
+      id="gfonts-css"
+      rel="stylesheet"
+      media="print"
+      onload="
+        this.media = 'all';
+        window.__gfontsLoaded = true;
+      "
+      href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Sans:wght@400;500;700&display=swap"
+    />
+    <script>
+      setTimeout(function () {
+        if (!window.__gfontsLoaded) {
+          var l = document.getElementById("gfonts-css");
+          if (l) l.remove();
+        }
+      }, 3500);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,78 @@
+import ot from "opentype.js";
+import type { Font } from "opentype.js";
+import type { FontMeta } from "./types";
+import { unwrapTTC } from "./ttc.ts";
+
+export interface LoadedFont {
+  buffer: ArrayBuffer;
+  font: Font;
+  meta: FontMeta;
+}
+
+function readNames(font: Font): { family: string; style: string } {
+  const names = (
+    font as unknown as {
+      names?: Record<string, Record<string, Record<string, string>>>;
+    }
+  ).names;
+  const plat = names?.windows ?? names?.macintosh;
+  if (plat) {
+    return {
+      family: plat.fontFamily?.en ?? "",
+      style: plat.fontSubfamily?.en ?? "",
+    };
+  }
+  return { family: "", style: "" };
+}
+
+export function loadFont(buffer: ArrayBuffer, fileName: string): LoadedFont {
+  let buffer2 = buffer;
+  const sig = new DataView(buffer).getUint32(0);
+  let numFonts = 1;
+  if (sig === 0x74746366) {
+    // 'ttcf' signature
+    try {
+      const unwrapped = unwrapTTC(buffer);
+      buffer2 = unwrapped.sfnt;
+      numFonts = unwrapped.numFonts;
+    } catch (e) {
+      throw new Error(`"${fileName}" TTC 解包失败`, { cause: e });
+    }
+  } else if (
+    sig !== 0x00010000 &&
+    sig !== 0x4f54544f && // 'OTTO'
+    sig !== 0x774f4646 && // 'wOFF'
+    sig !== 0x77384632 // 'wOF2'
+  ) {
+    throw new Error(
+      `"${fileName}" 不是有效的 TTF/OTF/WOFF（签名 0x${sig.toString(16)}）`,
+    );
+  }
+
+  let font: Font;
+  try {
+    font = ot.parse(buffer2);
+  } catch (e) {
+    throw new Error(`"${fileName}" 解析失败：${(e as Error).message}`, {
+      cause: e,
+    });
+  }
+  const names = readNames(font);
+  const meta: FontMeta = {
+    fileName,
+    familyName: names.family || fileName,
+    styleName: names.style || "",
+    unitsPerEm: font.unitsPerEm || 1000,
+    ascender: font.ascender || 0,
+    descender: font.descender || 0,
+    isVariable: "fvar" in font.tables,
+  };
+  return {
+    buffer: buffer2,
+    font,
+    meta: {
+      ...meta,
+      fileName: `${fileName}${numFonts > 1 ? `（ttc 含 ${numFonts} 字体，取第 1 个）` : ""}`,
+    },
+  };
+}

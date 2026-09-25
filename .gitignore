@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+
+# python
+__pycache__/
+*.py[cod]
+.ruff_cache/
+
+# local test fonts (keep out of git unless intentionally added as fixtures)
+*.ttf
+*.otf
+*.ttc
+*.woff
+*.woff2
