@@ -38,6 +38,7 @@
   "keywords": [],
   "author": "",
   "license": "GPL-3.0-only",
+  "packageManager": "pnpm@11.22.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/inchei/CJKonospace.git"
