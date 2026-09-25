@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["fonttools"]
+# ///
 """Generate the CJKonospace logo.
 
 字 (CJK) in its natural proportions, drawn as a hollow outline, split down the

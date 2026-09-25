@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["fonttools"]
+# ///
 """Merge a monospace font (base) with a CJK font.
 
 Mono is the base font so its GSUB/GPOS/GDEF and glyph IDs stay intact; scaled
