@@ -263,7 +263,32 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     full = f"{fam} {style}"
     ps = full.replace(" ", "")
     nt = base["name"]
-    for nid, val in ((1, fam), (2, style), (3, full), (4, full), (6, ps)):
+    tool_url = "https://github.com/inchei/CJKonospace"
+    synth = f"Synthesized with CJKonospace ({tool_url})"
+
+    def original_notices(name_id):
+        """Synthesis statement first, then both input fonts' own name records."""
+        parts = [synth]
+        for label, font in (("mono", base), ("CJK", cjk)):
+            text = font["name"].getDebugName(name_id) if "name" in font else None
+            if text:
+                parts.append(f"Original {label}:\n{text}")
+        return "\n\n".join(parts)
+
+    # read originals before overwriting; copyright keeps both source notices
+    copyright_notice = original_notices(0)
+    license_notice = original_notices(13)
+    for nid, val in (
+        (0, copyright_notice),
+        (1, fam),
+        (2, style),
+        (3, full),
+        (4, full),
+        (5, "Version 1.000"),
+        (6, ps),
+        (13, license_notice),
+        (14, tool_url),
+    ):
         nt.setName(val, nid, 3, 1, 0x409)
         nt.setName(val, nid, 1, 0, 0)
 
