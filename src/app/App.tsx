@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import "@/lib/i18n";
 import { loadFont, type LoadedFont } from "@/fontLoader";
-import { isWoff2, toSfnt } from "@/woff2";
+import { isWoff2, toSfnt, toWoff2 } from "@/woff2";
 import { DEFAULT_PARAMS, type Params } from "@/params";
 import { renderPreview } from "@/preview";
 import { ensureShaping, shapeMonoRun } from "@/shaper";
@@ -253,6 +253,11 @@ export default function App() {
     added?: number;
   }>({ status: "idle" });
   const genUrlRef = useRef<string | null>(null);
+  const genBytesRef = useRef<ArrayBuffer | null>(null);
+  const [woff2, setWoff2] = useState<{ busy: boolean; error: string | null }>({
+    busy: false,
+    error: null,
+  });
 
   useEffect(
     () => () => {
@@ -327,6 +332,8 @@ export default function App() {
       if (genUrlRef.current) URL.revokeObjectURL(genUrlRef.current);
       const url = URL.createObjectURL(new Blob([data], { type: "font/ttf" }));
       genUrlRef.current = url;
+      genBytesRef.current = data;
+      setWoff2({ busy: false, error: null });
       const face = new FontFace("CJKonoGenerated", data);
       await face.load();
       document.fonts.add(face);
@@ -339,6 +346,28 @@ export default function App() {
     } catch (e) {
       setGen({
         status: "error",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  /** Repackage the generated TTF as WOFF2 (lazy woff2-encoder) and download it. */
+  async function handleDownloadWoff2() {
+    const bytes = genBytesRef.current;
+    if (!bytes || !gen.fileName) return;
+    setWoff2({ busy: true, error: null });
+    try {
+      const out = await toWoff2(bytes.slice(0));
+      const url = URL.createObjectURL(new Blob([out], { type: "font/woff2" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = gen.fileName.replace(/\.ttf$/, ".woff2");
+      a.click();
+      URL.revokeObjectURL(url);
+      setWoff2({ busy: false, error: null });
+    } catch (e) {
+      setWoff2({
+        busy: false,
         error: e instanceof Error ? e.message : String(e),
       });
     }
@@ -713,6 +742,20 @@ export default function App() {
                   >
                     {t("gen.download")} · {gen.fileName}
                   </a>
+                  <Button
+                    className={WRAP_BTN}
+                    variant="neutral"
+                    size="sm"
+                    onClick={handleDownloadWoff2}
+                    disabled={woff2.busy}
+                  >
+                    {woff2.busy ? t("gen.compressing") : t("gen.downloadWoff2")}
+                  </Button>
+                  {woff2.error && (
+                    <p className="text-xs font-base break-all">
+                      ✗ {woff2.error}
+                    </p>
+                  )}
                   <div className="flex flex-col gap-1.5">
                     <Label>{t("gen.testLabel")}</Label>
                     <Textarea

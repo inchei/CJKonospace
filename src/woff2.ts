@@ -20,3 +20,13 @@ export async function toSfnt(buffer: ArrayBuffer): Promise<ArrayBuffer> {
     out.byteOffset + out.byteLength,
   ) as ArrayBuffer;
 }
+
+/** Package a sfnt (TTF/OTF) buffer as WOFF2. Loaded lazily. */
+export async function toWoff2(sfnt: ArrayBuffer): Promise<ArrayBuffer> {
+  const { compress } = await import("woff2-encoder");
+  const out = await compress(new Uint8Array(sfnt));
+  return out.buffer.slice(
+    out.byteOffset,
+    out.byteOffset + out.byteLength,
+  ) as ArrayBuffer;
+}

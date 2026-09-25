@@ -325,9 +325,12 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         base["gasp"] = gasp
 
     report("save")
+    fmt = str(params.get("format", "ttf")).lower()
+    if fmt == "woff2":
+        base.flavor = "woff2"  # brotli-compressed packaging of the same TTF
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
-    return {"added": added, "upem": upem}
+    return {"added": added, "upem": upem, "format": fmt}
 
 
 if __name__ == "__main__":
