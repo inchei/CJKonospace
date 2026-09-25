@@ -25,9 +25,14 @@ from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._g_l_y_f import Glyph
 
 
-def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem):
+def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem, reverse=False):
+    """Redraw a glyph with a pen (used for CFF sources and composites).
+
+    reverse=True flips contour direction, which is needed for CFF (PostScript)
+    sources: CFF is counter-clockwise, TrueType conventionally clockwise.
+    """
     pen = TTGlyphPen(None)
-    cu2qu = Cu2QuPen(pen, max_err=upem * 0.001)
+    cu2qu = Cu2QuPen(pen, max_err=upem * 0.001, reverse_direction=reverse)
     tpen = TransformPen(cu2qu, Transform(sx, 0, 0, sy, dx, dy))
     src_glyph_set[name].draw(tpen)
     return pen.glyph()
@@ -51,7 +56,8 @@ def _to_glyf(font, upem):
     glyf.glyphs = {}
     for name in glyph_order:
         pen = TTGlyphPen(glyf.glyphs)
-        cu2qu = Cu2QuPen(pen, max_err=upem * 0.001)
+        # CFF is counter-clockwise; TrueType wants clockwise
+        cu2qu = Cu2QuPen(pen, max_err=upem * 0.001, reverse_direction=True)
         glyph_set[name].draw(cu2qu)
         glyf.glyphs[name] = pen.glyph()
     font["glyf"] = glyf
@@ -154,6 +160,7 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     base_glyphs = base.getGlyphSet()
     cjk_glyphs = cjk.getGlyphSet()
     cjk_glyf = cjk.get("glyf")
+    cjk_is_cff = "CFF " in cjk or "CFF2" in cjk
     # vertical metrics are optional but must cover every glyph if the base has them
     base_vmtx = base.get("vmtx")
     cjk_vmtx = cjk.get("vmtx")
@@ -204,7 +211,7 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         if cjk_glyf is not None:
             g = _move_glyf_glyph(cjk_glyf, cname, sx, sy, dx, dy)
         if g is None:
-            g = _pen_glyph(cjk_glyphs, cname, sx, sy, dx, dy, upem)
+            g = _pen_glyph(cjk_glyphs, cname, sx, sy, dx, dy, upem, cjk_is_cff)
         # glyf.__setitem__ appends to glyphOrder itself (O(1) via its reverse map);
         # appending again here would force a rebuild every iteration (O(n^2)).
         base_glyf[gname] = g
