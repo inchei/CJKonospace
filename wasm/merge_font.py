@@ -275,6 +275,35 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         base["OS/2"].panose.bProportion = 9  # monospace
         base["OS/2"].xAvgCharWidth = round(mono_ref_adv * mono_adv_mul)
 
+    # --- vertical metrics: from both fonts' declared hhea, times lineHeight ---
+    # (mirrored exactly by the web preview, which reads ascender/descender via
+    # opentype.js; the mono base's own metrics may not fit the scaled CJK)
+    multiplier = float(params.get("lineHeight", 1.3))
+    bl_units = cjk_bl * units_per_px
+    if "hhea" in cjk:
+        cjk_asc = cjk["hhea"].ascent * cjk_scale + bl_units
+        cjk_desc = cjk["hhea"].descent * cjk_scale + bl_units
+    else:
+        cjk_asc, cjk_desc = upem * 0.88 + bl_units, -upem * 0.12 + bl_units
+    base_asc = base["hhea"].ascent if "hhea" in base else upem
+    base_desc = base["hhea"].descent if "hhea" in base else 0
+    top = otRound(max(base_asc, cjk_asc))
+    bot = otRound(min(base_desc, cjk_desc))
+    glyph_h = top - bot
+    extra = round(glyph_h * multiplier) - glyph_h
+    above = round(extra * 0.6)
+    ascender = top + above
+    descender = bot - (extra - above)
+    if "hhea" in base:
+        base["hhea"].ascent = ascender
+        base["hhea"].descent = descender
+    if "OS/2" in base:
+        os2 = base["OS/2"]
+        os2.sTypoAscender = ascender
+        os2.sTypoDescender = descender
+        os2.usWinAscent = ascender
+        os2.usWinDescent = -descender
+
     # --- gasp: let Windows grid-fit/antialias mixed hinted/unhinted glyphs ---
     if "gasp" not in base:
         from fontTools.ttLib import newTable

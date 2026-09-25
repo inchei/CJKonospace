@@ -4,6 +4,9 @@ import type { Override, Params } from "./params";
 import type { ShapedGlyph } from "./shaper";
 import type { Slot } from "./types";
 
+/** Default line-height multiplier for the generated font (see wasm/merge_font.py). */
+const LINE_HEIGHT = 1.3;
+
 export interface RenderInput {
   cjkFont: LoadedFont | null;
   monoFont: LoadedFont | null;
@@ -168,9 +171,37 @@ export function renderPreview(
     ? "rgba(220,210,190,0.45)"
     : "rgba(58,58,58,0.6)";
   const centerColor = isDark ? "rgba(120,170,255,0.6)" : "rgba(30,79,192,0.7)";
+  const ascColor = isDark ? "rgba(120,220,150,0.65)" : "rgba(20,140,70,0.75)";
+  const descColor = isDark ? "rgba(235,175,95,0.65)" : "rgba(180,90,10,0.75)";
 
   const fs = params.fontSize;
-  const lineH = fs * 1.7;
+
+  // Vertical metrics, mirroring merge_font.py: the generated ascent/descent come
+  // from both fonts' declared hhea ascender/descender (times lineHeight).
+  const metricTop = Math.max(
+    monoFont
+      ? monoFont.meta.ascender * (fs / monoFont.meta.unitsPerEm)
+      : -Infinity,
+    cjkFont
+      ? cjkFont.meta.ascender * (fs / cjkFont.meta.unitsPerEm) +
+          params.cjkBaselineOffset
+      : -Infinity,
+  );
+  const metricBot = Math.min(
+    monoFont
+      ? monoFont.meta.descender * (fs / monoFont.meta.unitsPerEm)
+      : Infinity,
+    cjkFont
+      ? cjkFont.meta.descender * (fs / cjkFont.meta.unitsPerEm) +
+          params.cjkBaselineOffset
+      : Infinity,
+  );
+  const hasInk = Number.isFinite(metricTop) && Number.isFinite(metricBot);
+  const glyphH = hasInk ? metricTop - metricBot : 0;
+  const lineH = hasInk ? glyphH * LINE_HEIGHT : fs * 1.7;
+  const extra = hasInk ? lineH - glyphH : 0;
+  const ascender = hasInk ? metricTop + extra * 0.6 : 0;
+  const descender = hasInk ? metricBot - (extra - extra * 0.6) : 0;
 
   // advance in pixels
   const u2pxMono = monoFont ? fs / monoFont.meta.unitsPerEm : 0;
@@ -296,6 +327,19 @@ export function renderPreview(
     if (opts.showGrid) {
       // row baseline
       refLine(ctx, 0, baseY, W, baseY, baselineColor);
+      // generated-font ascent / descent (computed from lineHeight).
+      // Drawn once: consecutive rows' asc/desc guides land on the same y.
+      if (hasInk && li === 0) {
+        const ascY = baseY - ascender;
+        const descY = baseY - descender;
+        refLine(ctx, 0, ascY, W, ascY, ascColor, [6, 4], 1);
+        refLine(ctx, 0, descY, W, descY, descColor, [6, 4], 1);
+        ctx.fillStyle = ascColor;
+        ctx.font = "10px ui-monospace, monospace";
+        ctx.fillText("asc", 4, ascY - 3);
+        ctx.fillStyle = descColor;
+        ctx.fillText("desc", 4, descY - 3);
+      }
       // vertical grid: advance boundary of every char
       if (items.length > 0) {
         const lineTop = baseY - fs * 1.1;

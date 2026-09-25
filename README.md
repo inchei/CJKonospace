@@ -33,23 +33,27 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
   "lock2to1": true,
   "familyName": "MyMono",
   "styleName": "Regular",
+  "lineHeight": 1.3,
   "mono": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0 },
   "cjk": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0 }
 }
 ```
 
-| Key                       | Meaning                                                                                  |
-| ------------------------- | ---------------------------------------------------------------------------------------- |
-| `fs`                      | reference font size in px; only used to convert `baseline` offsets from px to font units |
-| `lock2to1`                | lock CJK advance to 2 × mono advance (the whole point of the tool)                       |
-| `mono` / `cjk.advMul`     | advance multiplier                                                                       |
-| `mono` / `cjk.gsx`, `gsy` | outline scale (glyph width / height), advance untouched                                  |
-| `mono` / `cjk.baseline`   | baseline offset in px (see `fs`)                                                         |
+| Key                       | Meaning                                                                                   |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| `fs`                      | reference font size in px; only used to convert `baseline` offsets from px to font units  |
+| `lock2to1`                | lock CJK advance to 2 × mono advance (the whole point of the tool)                        |
+| `lineHeight`              | multiplier for the recomputed ascent/descent (default `1.3`; use `1.0` for tight metrics) |
+| `mono` / `cjk.advMul`     | advance multiplier                                                                        |
+| `mono` / `cjk.gsx`, `gsy` | outline scale (glyph width / height), advance untouched                                   |
+| `mono` / `cjk.baseline`   | baseline offset in px (see `fs`)                                                          |
 
 Notes:
 
 - Output is always TrueType (`glyf`). A CFF/OTF mono base is converted (cu2qu; CFF hinting is dropped).
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.
+- Vertical metrics (`hhea` ascent/descent, `OS/2` typo + win metrics) are recomputed to cover every glyph, so tall CJK glyphs are not clipped.
+- The result is flagged monospace: `post.isFixedPitch = 1`, `OS/2.panose.bProportion = 9`, `OS/2.xAvgCharWidth` = half-width; a `gasp` table is added when missing.
 
 ## License
 
