@@ -28,6 +28,12 @@ const zhHant = {
     instance: "內建實例",
     vfWarning:
       "⚠ 可變字體在瀏覽器生成耗時較長，建議僅瀏覽或下載 build.py 本地生成",
+    systemFont: "從系統字型選擇",
+    systemFontSearch: "搜尋字型…",
+    systemFontEmpty: "找不到符合的字型",
+    systemFontLoading: "讀取系統字型…",
+    systemFontError: "無法存取系統字型",
+    systemFontCancel: "取消",
   },
   params: {
     title: "參數",
@@ -138,6 +144,12 @@ void i18next
             instance: "内置实例",
             vfWarning:
               "⚠ 可变字体在浏览器生成耗时较长，建议仅浏览或下载 build.py 本地生成",
+            systemFont: "从系统字体选择",
+            systemFontSearch: "搜索字体…",
+            systemFontEmpty: "找不到匹配的字体",
+            systemFontLoading: "读取系统字体…",
+            systemFontError: "无法访问系统字体",
+            systemFontCancel: "取消",
           },
           params: {
             title: "参数",
@@ -226,6 +238,12 @@ void i18next
             instance: "組み込みインスタンス",
             vfWarning:
               "⚠ 可変フォントはブラウザでの生成に時間がかかるため、プレビューのみの利用か build.py のダウンロードによるローカル生成を推奨します",
+            systemFont: "システムフォントから選択",
+            systemFontSearch: "フォントを検索…",
+            systemFontEmpty: "一致するフォントがありません",
+            systemFontLoading: "システムフォントを読み込み中…",
+            systemFontError: "システムフォントにアクセスできません",
+            systemFontCancel: "キャンセル",
           },
           params: {
             title: "パラメータ",
@@ -318,6 +336,12 @@ void i18next
             instance: "내장 인스턴스",
             vfWarning:
               "⚠ 가변 폰트는 브라우저에서 생성에 시간이 오래 걸리므로, 미리보기로만 사용하거나 build.py를 다운로드하여 로컬에서 생성하시기 바랍니다",
+            systemFont: "시스템 폰트에서 선택",
+            systemFontSearch: "폰트 검색…",
+            systemFontEmpty: "일치하는 폰트가 없습니다",
+            systemFontLoading: "시스템 폰트 읽는 중…",
+            systemFontError: "시스템 폰트에 접근할 수 없습니다",
+            systemFontCancel: "취소",
           },
           params: {
             title: "매개변수",

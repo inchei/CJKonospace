@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { FolderSearch } from "lucide-react";
 
 import "@/lib/i18n";
 import { loadFont, type LoadedFont } from "@/fontLoader";
@@ -42,6 +43,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { LANGS } from "@/lib/i18n";
 import { MONO_PRESETS, type MonoPreset } from "@/lib/monoPresets";
+import {
+  listLocalFonts,
+  supportsLocalFonts,
+  type SystemFontData,
+} from "@/localFonts";
+import { SystemFontPicker } from "@/components/SystemFontPicker";
 
 const CJK_BG = "#ff85a1";
 const MONO_BG = "#70d6ff";
@@ -322,6 +329,14 @@ export default function App() {
   const [subset, setSubset] = useState<SubsetState>(SUBSET_DEFAULT);
   const [subsetUnicodes, setSubsetUnicodes] = useState<number[] | null>(null);
   const [subsetEstimate, setSubsetEstimate] = useState<number | null>(null);
+  // Local Font Access API picker (Chromium only; hidden elsewhere)
+  const supportsSystemFonts = supportsLocalFonts();
+  const [pickerSlot, setPickerSlot] = useState<"cjk" | "mono" | null>(null);
+  const [systemFonts, setSystemFonts] = useState<{
+    status: "loading" | "ready" | "error";
+    fonts: SystemFontData[];
+    error?: string;
+  }>({ status: "loading", fonts: [] });
 
   useEffect(() => {
     let cancelled = false;
@@ -521,13 +536,16 @@ export default function App() {
     });
   }, []);
 
-  async function setSlot(slot: "cjk" | "mono", file: File | undefined) {
-    if (!file) return;
+  /** Load a slot from any named byte source (a File, or an OS font blob). */
+  async function loadSlot(
+    slot: "cjk" | "mono",
+    source: { name: string; arrayBuffer(): Promise<ArrayBuffer> },
+  ) {
     const setter = slot === "cjk" ? setCjk : setMono;
     setGen({ status: "idle" });
     setter((s) => ({ ...s, busy: true, busyLabel: null, error: null }));
     try {
-      const buf = await file.arrayBuffer();
+      const buf = await source.arrayBuffer();
       if (isWoff2(buf)) {
         setter((s) => ({ ...s, busyLabel: t("load.woff2") }));
       }
@@ -537,10 +555,10 @@ export default function App() {
       if (isTTC(sfnt)) {
         const faces = inspectTTC(sfnt);
         const index = pickTtcFace(faces, lang);
-        font = loadFont(sfnt, file.name, index);
-        ttc = { buffer: sfnt, fileName: file.name, faces, index };
+        font = loadFont(sfnt, source.name, index);
+        ttc = { buffer: sfnt, fileName: source.name, faces, index };
       } else {
-        font = loadFont(sfnt, file.name);
+        font = loadFont(sfnt, source.name);
       }
       setter({
         font,
@@ -560,6 +578,38 @@ export default function App() {
         coords: {},
       });
     }
+  }
+
+  async function setSlot(slot: "cjk" | "mono", file: File | undefined) {
+    if (!file) return;
+    await loadSlot(slot, file);
+  }
+
+  /** Enumerate OS fonts. Must stay within the click gesture for the prompt. */
+  function openSystemFonts(slot: "cjk" | "mono") {
+    setPickerSlot(slot);
+    setSystemFonts({ status: "loading", fonts: [] });
+    listLocalFonts()
+      .then((fonts) => setSystemFonts({ status: "ready", fonts }))
+      .catch((e) =>
+        setSystemFonts({
+          status: "error",
+          fonts: [],
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      );
+  }
+
+  /** Load the picked OS font via the shared slot path (handles TTC, woff2…). */
+  async function selectSystemFont(font: SystemFontData) {
+    const slot = pickerSlot;
+    setPickerSlot(null);
+    if (!slot) return;
+    const name = `${font.postscriptName || font.family || "font"}.ttf`;
+    await loadSlot(slot, {
+      name,
+      arrayBuffer: async () => (await font.blob()).arrayBuffer(),
+    });
   }
 
   /** Re-unpack a loaded TTC with another face selected. */
@@ -728,6 +778,10 @@ export default function App() {
                 onAxis={(tag, v) => setAxis("cjk", tag, v)}
                 onInstance={(c) => setInstance("cjk", c)}
                 vfWarningLabel={t("load.vfWarning")}
+                onSystemFont={
+                  supportsSystemFonts ? () => openSystemFonts("cjk") : undefined
+                }
+                systemFontLabel={t("load.systemFont")}
                 subset={{
                   label: t("subset.label"),
                   presets: SUBSET_PRESETS.map((id) => ({
@@ -768,6 +822,12 @@ export default function App() {
                 onAxis={(tag, v) => setAxis("mono", tag, v)}
                 onInstance={(c) => setInstance("mono", c)}
                 vfWarningLabel={t("load.vfWarning")}
+                onSystemFont={
+                  supportsSystemFonts
+                    ? () => openSystemFonts("mono")
+                    : undefined
+                }
+                systemFontLabel={t("load.systemFont")}
                 presetLabel={t("load.preset")}
                 presetPlaceholder={t("load.presetPlaceholder")}
                 downloadingLabel={t("load.downloading")}
@@ -1077,6 +1137,24 @@ export default function App() {
           </div>
         </Card>
       </main>
+
+      {pickerSlot && (
+        <SystemFontPicker
+          status={systemFonts.status}
+          fonts={systemFonts.fonts}
+          error={systemFonts.error}
+          onSelect={selectSystemFont}
+          onClose={() => setPickerSlot(null)}
+          labels={{
+            title: t("load.systemFont"),
+            search: t("load.systemFontSearch"),
+            empty: t("load.systemFontEmpty"),
+            loading: t("load.systemFontLoading"),
+            error: t("load.systemFontError"),
+            cancel: t("load.systemFontCancel"),
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1100,6 +1178,8 @@ function FontSlotInfo({
   presetPlaceholder,
   downloadingLabel,
   onPreset,
+  onSystemFont,
+  systemFontLabel,
 }: {
   label: string;
   color: string;
@@ -1129,6 +1209,8 @@ function FontSlotInfo({
   presetPlaceholder?: string;
   downloadingLabel?: string;
   onPreset?: (p: MonoPreset) => void;
+  onSystemFont?: () => void;
+  systemFontLabel?: string;
 }) {
   const font = slot.font;
   const meta = font?.meta;
@@ -1143,28 +1225,44 @@ function FontSlotInfo({
       : -1;
   return (
     <div className="flex flex-col gap-2">
-      <label
-        className={cn(
-          buttonVariants({ variant: "neutral", size: "sm" }),
-          "w-full cursor-pointer bg-cover",
-        )}
-        style={{
-          backgroundColor: color,
-          color: "#0a0a0a",
-        }}
-      >
-        {slot.busy ? (slot.busyLabel ?? downloadingLabel ?? "…") : label}
-        <input
-          type="file"
-          accept=".ttf,.otf,.ttc,.woff,.woff2"
-          className="sr-only"
-          disabled={slot.busy}
-          onChange={(e) => {
-            onFile(e.target.files?.[0]);
-            e.currentTarget.value = "";
+      <div className="flex items-stretch gap-2">
+        <label
+          className={cn(
+            buttonVariants({ variant: "neutral", size: "sm" }),
+            "min-w-0 flex-1 cursor-pointer bg-cover",
+          )}
+          style={{
+            backgroundColor: color,
+            color: "#0a0a0a",
           }}
-        />
-      </label>
+        >
+          {slot.busy ? (slot.busyLabel ?? downloadingLabel ?? "…") : label}
+          <input
+            type="file"
+            accept=".ttf,.otf,.ttc,.woff,.woff2"
+            className="sr-only"
+            disabled={slot.busy}
+            onChange={(e) => {
+              onFile(e.target.files?.[0]);
+              e.currentTarget.value = "";
+            }}
+          />
+        </label>
+        {onSystemFont && (
+          <Button
+            type="button"
+            variant="neutral"
+            size="icon-sm"
+            className="shrink-0"
+            disabled={slot.busy}
+            onClick={onSystemFont}
+            title={systemFontLabel}
+            aria-label={systemFontLabel}
+          >
+            <FolderSearch />
+          </Button>
+        )}
+      </div>
       {slot.ttc && slot.ttc.faces.length > 1 && (
         <label className="flex flex-col gap-1 text-xs font-base">
           <span className="font-heading">{ttcLabel}</span>
