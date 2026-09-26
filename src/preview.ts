@@ -179,6 +179,28 @@ export function renderPreview(
 
   const fs = params.fontSize;
 
+  // opentype.js bakes a CFF glyph's outline on first `.path` access using the
+  // font-wide variation state, while getTransform() cannot see any variation
+  // data until that first parse defines getBlendPath. Sync the font-wide
+  // state every render so newly seen glyphs instance correctly on their
+  // first paint, too (getTransform below still handles later coord changes,
+  // when the baked path would otherwise go stale).
+  for (const [font, coords] of [
+    [monoFont, input.monoCoords],
+    [cjkFont, input.cjkCoords],
+  ] as const) {
+    if (!font || !coords || Object.keys(coords).length === 0) continue;
+    try {
+      (
+        font.font as unknown as {
+          variation?: { set(c: Record<string, number>): void };
+        }
+      ).variation?.set({ ...coords });
+    } catch {
+      /* keep the default instance */
+    }
+  }
+
   /** Apply a variable font's instance location to a glyph (opentype.js variation). */
   function varied(font: LoadedFont, glyph: Glyph): Glyph {
     const coords = font === cjkFont ? input.cjkCoords : input.monoCoords;
