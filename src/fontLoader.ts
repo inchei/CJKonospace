@@ -75,9 +75,12 @@ function readNames(font: Font): { family: string; style: string } {
   ).names;
   const plat = names?.windows ?? names?.macintosh;
   if (plat) {
+    // Prefer the typographic names (ID 16/17) so WWS families that encode the
+    // weight in the RIBBI family name (e.g. "Foo Normal" / "Regular") are shown
+    // as "Foo" / "Normal". opentype.js falls back 16/17 -> 1/2 when absent.
     return {
-      family: plat.fontFamily?.en ?? "",
-      style: plat.fontSubfamily?.en ?? "",
+      family: enName(plat.preferredFamily) || enName(plat.fontFamily),
+      style: enName(plat.preferredSubfamily) || enName(plat.fontSubfamily),
     };
   }
   return { family: "", style: "" };

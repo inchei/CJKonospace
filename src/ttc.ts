@@ -15,7 +15,7 @@ function ttcFaceCount(buffer: ArrayBuffer): number {
   return new DataView(buffer).getUint32(8);
 }
 
-/** Read nameID 1/2 out of a face's `name` table without parsing its glyphs. */
+/** Read nameID 1/2/16/17 out of a face's `name` table without parsing glyphs. */
 function readFaceName(
   buffer: ArrayBuffer,
   faceOffset: number,
@@ -36,12 +36,15 @@ function readFaceName(
   const stringOffset = view.getUint16(nameOff + 4);
   let family = "";
   let style = "";
+  let preferredFamily = "";
+  let preferredStyle = "";
   for (let i = 0; i < count; i++) {
     const rec = nameOff + 6 + i * 12;
     const platformID = view.getUint16(rec);
     const languageID = view.getUint16(rec + 4);
     const nameID = view.getUint16(rec + 6);
-    if (nameID !== 1 && nameID !== 2) continue;
+    if (nameID !== 1 && nameID !== 2 && nameID !== 16 && nameID !== 17)
+      continue;
     if (platformID !== 3 && platformID !== 1) continue;
     // Windows/English (0x409) or Macintosh/English (0)
     if (platformID === 3 ? languageID !== 0x409 : languageID !== 0) continue;
@@ -58,8 +61,14 @@ function readFaceName(
     }
     if (nameID === 1 && !family) family = text;
     else if (nameID === 2 && !style) style = text;
+    else if (nameID === 16 && !preferredFamily) preferredFamily = text;
+    else if (nameID === 17 && !preferredStyle) preferredStyle = text;
   }
-  return { family, style };
+  // Prefer the typographic names (16/17) over the RIBBI ones (1/2).
+  return {
+    family: preferredFamily || family,
+    style: preferredStyle || style,
+  };
 }
 
 /** List every face in a TTC (family/style only, applies to All/English name records). */

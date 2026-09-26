@@ -434,8 +434,9 @@ def _name_string(font, name_id):
 
 def _synthesize_names(base, cjk, p):
     """Overwrite the output name records, keeping both inputs' attribution."""
-    # An unset subfamily follows the mono base's own subfamily (name ID 2).
-    style = p.style or _name_string(base, 2) or "Regular"
+    # An unset subfamily follows the mono base's own subfamily (prefer the
+    # typographic ID 17, else the RIBBI ID 2).
+    style = p.style or _name_string(base, 17) or _name_string(base, 2) or "Regular"
     fam = p.family
     full = f"{fam} {style}"
     ps = full.replace(" ", "")
