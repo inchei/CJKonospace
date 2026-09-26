@@ -317,7 +317,7 @@ export default function App() {
   }>({ status: "idle" });
   // advanced generation options (also settable via CLI params.json)
   const [advFamily, setAdvFamily] = useState("");
-  const [advStyle, setAdvStyle] = useState("Regular");
+  const [advStyle, setAdvStyle] = useState("");
   const [advFormat, setAdvFormat] = useState<"ttf" | "woff2">("ttf");
   const genUrlRef = useRef<string | null>(null);
   const genBytesRef = useRef<ArrayBuffer | null>(null);
@@ -390,7 +390,7 @@ export default function App() {
       lineHeight: params.lineHeight,
       format: advFormat,
       familyName: advFamily.trim() || joined || "CJKonospace",
-      styleName: advStyle.trim() || "Regular",
+      styleName: advStyle.trim(),
       mono: {
         advMul: params.monoAdvMul,
         gsx: params.monoGlyphScale,
@@ -1076,9 +1076,13 @@ export default function App() {
                         </span>
                         <Input
                           value={advStyle}
+                          placeholder={mono.font?.meta.styleName || "Regular"}
                           onChange={(e) => setAdvStyle(e.target.value)}
                           aria-label={t("gen.styleName")}
                         />
+                        <span className="opacity-70">
+                          {t("gen.styleNameHint")}
+                        </span>
                       </label>
                       <div>
                         <div className="mb-1 flex items-center justify-between gap-2">

@@ -89,8 +89,8 @@ def _width_from_style(style):
 
 def _sync_subfamily_style(base, style):
     """Sync usWeightClass/usWidthClass, fsSelection and head.macStyle from the
-    freely-typed subfamily; unrecognized names keep the base values. Style-bit
-    rules follow the OpenType name examples:
+    freely-typed subfamily; an empty or unrecognized name keeps the base
+    values. Style-bit rules follow the OpenType name examples:
     https://learn.microsoft.com/en-us/typography/opentype/spec/namesmp
     """
     normalized = _normalize_style(style)
@@ -98,6 +98,7 @@ def _sync_subfamily_style(base, style):
     width = _width_from_style(style)
     italic = bool(re.search(r"\bitalic\b", normalized))
     oblique = bool(re.search(r"\boblique\b", normalized))
+    # unset (empty) or unrecognized: keep the mono base's style metadata
     if weight is None and width is None and not italic and not oblique:
         return
 
@@ -259,7 +260,8 @@ def _read_params(params):
         subset_unicodes=(cp.get("subset") or {}).get("unicodes") or [],
         variations=params.get("variations") or {},
         family=params.get("familyName", "CJKonospace"),
-        style=params.get("styleName", "Regular"),
+        # empty means "unset": follow the mono base's own subfamily
+        style=str(params.get("styleName") or "").strip(),
         line_height=float(params.get("lineHeight", 1.3)),
         fmt=str(params.get("format", "ttf")).lower(),
     )
@@ -423,10 +425,18 @@ def _merge_cmap(base, base_cmap, added_cmap, report):
         base["cmap"].tables.append(sub)
 
 
+def _name_string(font, name_id):
+    """Best available name-table string for name_id, or ""."""
+    if "name" not in font:
+        return ""
+    return font["name"].getDebugName(name_id) or ""
+
+
 def _synthesize_names(base, cjk, p):
     """Overwrite the output name records, keeping both inputs' attribution."""
+    # An unset subfamily follows the mono base's own subfamily (name ID 2).
+    style = p.style or _name_string(base, 2) or "Regular"
     fam = p.family
-    style = p.style
     full = f"{fam} {style}"
     ps = full.replace(" ", "")
     nt = base["name"]
@@ -435,12 +445,9 @@ def _synthesize_names(base, cjk, p):
 
     def original_texts(name_id):
         """Name record texts from the input fonts having this record."""
-        out = []
-        for font in (base, cjk):
-            text = font["name"].getDebugName(name_id) if "name" in font else None
-            if text:
-                out.append(text)
-        return out
+        return [
+            t for t in (_name_string(base, name_id), _name_string(cjk, name_id)) if t
+        ]
 
     def original_notices(name_id):
         """Synthesis statement first, then both input fonts' own name records."""

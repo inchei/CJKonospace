@@ -74,6 +74,7 @@ Notes:
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.
 - Vertical metrics (`hhea` ascent/descent, `OS/2` typo + win metrics) are recomputed to cover every glyph, so tall CJK glyphs are not clipped.
 - The result is flagged monospace: `post.isFixedPitch = 1`, `OS/2.panose.bProportion = 9`, `OS/2.xAvgCharWidth` = half-width; a `gasp` table is added when missing.
+- `styleName` is freely typed and sets the output subfamily (name IDs 2/17/22) and style metadata (`OS/2.usWeightClass`, `OS/2.usWidthClass`, `fsSelection`, `head.macStyle`), using the keyword mapping from the [OpenType name examples](https://learn.microsoft.com/en-us/typography/opentype/spec/namesmp). It can be left empty to inherit the mono base's subfamily and keep its style metadata unchanged.
 
 ## License
 
