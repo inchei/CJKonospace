@@ -8,13 +8,20 @@ Mono is the base font so its GSUB/GPOS/GDEF and glyph IDs stay intact; scaled
 CJK glyphs are appended at the end of the glyph order and exposed through cmap.
 fontTools only, no numpy -- runs inside pyodide (see src/exporter.ts).
 
+Kept deliberately as one self-contained module: src/lib/mergeScript.ts slices
+it above the __main__ guard to emit a standalone build.py, and the pyodide
+worker writes/imports it as a single file. Steps are separated into helpers
+rather than modules to keep both packagings working unchanged.
+
 CLI:
     python merge_font.py mono.ttf cjk.ttf out.ttf params.json
 """
 
 import copy
 import json
+import re
 import sys
+from types import SimpleNamespace
 
 from fontTools.misc.roundTools import otRound
 from fontTools.misc.transform import Transform
@@ -23,6 +30,42 @@ from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._g_l_y_f import Glyph
+
+# Style-name keywords -> OS/2 usWeightClass. Compound forms are listed before
+# the plain ones so "ExtraBold"/"SemiBold" are not captured as "Bold"; matched
+# against a lowercased, whitespace-normalized style name (word boundaries keep
+# e.g. "highlight" from matching "light").
+_WEIGHT_PATTERNS = (
+    (r"\bextra\s*black\b|\bultra\s*black\b", 950),
+    (r"\bextra\s*bold\b|\bultra\s*bold\b", 800),
+    (r"\bextra\s*light\b|\bultra\s*light\b", 200),
+    (r"\bsemi\s*bold\b|\bdemi\s*bold\b", 600),
+    (r"\bsemi\s*light\b|\bdemi\s*light\b", 350),
+    (r"\bhairline\b|\bthin\b", 100),
+    (r"\blight\b", 300),
+    (r"\bbook\b|\bregular\b|\bnormal\b", 400),
+    (r"\bmedium\b", 500),
+    (r"\bbold\b", 700),
+    (r"\bblack\b|\bheavy\b", 900),
+)
+
+
+def _weight_from_style(style):
+    """Infer an OS/2 usWeightClass from a freely-typed style name.
+
+    Recognizes the common CSS/OpenType weight keywords (compound forms like
+    "ExtraBold" or "Extra Bold" included) and, failing that, a bare numeric
+    weight (e.g. "700"). Returns None when nothing recognizable is present so
+    the caller can keep the source font's value.
+    """
+    normalized = re.sub(r"[^0-9a-z]+", " ", style.lower()).strip()
+    if not normalized:
+        return None
+    for pattern, weight in _WEIGHT_PATTERNS:
+        if re.search(pattern, normalized):
+            return weight
+    found = re.search(r"\b(?:[1-9][0-9]{2}|1000)\b", normalized)
+    return int(found.group(0)) if found else None
 
 
 def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem, reverse=False):
@@ -124,146 +167,167 @@ def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
     return new
 
 
-def merge(mono_path, cjk_path, out_path, params, progress=None):
-    def report(stage, value=None):
-        if progress:
-            progress(stage, value)
-
-    fs = float(params.get("fs", 48))
-    lock = bool(params.get("lock2to1", True))
+def _read_params(params):
+    """Flatten the merge parameters into a single namespace."""
     mp = params.get("mono", {})
     cp = params.get("cjk", {})
-    mono_adv_mul = float(mp.get("advMul", 1))
-    mono_gsx = float(mp.get("gsx", 1))
-    mono_gsy = float(mp.get("gsy", 1))
-    mono_bl = float(mp.get("baseline", 0))
-    cjk_adv_mul = float(cp.get("advMul", 1))
-    cjk_gsx = float(cp.get("gsx", 1))
-    cjk_gsy = float(cp.get("gsy", 1))
-    cjk_bl = float(cp.get("baseline", 0))
+    return SimpleNamespace(
+        fs=float(params.get("fs", 48)),
+        lock=bool(params.get("lock2to1", True)),
+        mono_ttc_index=int(mp.get("ttcIndex", 0)),
+        cjk_ttc_index=int(cp.get("ttcIndex", 0)),
+        mono_adv_mul=float(mp.get("advMul", 1)),
+        mono_gsx=float(mp.get("gsx", 1)),
+        mono_gsy=float(mp.get("gsy", 1)),
+        mono_bl=float(mp.get("baseline", 0)),
+        cjk_adv_mul=float(cp.get("advMul", 1)),
+        cjk_gsx=float(cp.get("gsx", 1)),
+        cjk_gsy=float(cp.get("gsy", 1)),
+        cjk_bl=float(cp.get("baseline", 0)),
+        subset_unicodes=(cp.get("subset") or {}).get("unicodes") or [],
+        variations=params.get("variations") or {},
+        family=params.get("familyName", "CJKonospace"),
+        style=params.get("styleName", "Regular"),
+        line_height=float(params.get("lineHeight", 1.3)),
+        fmt=str(params.get("format", "ttf")).lower(),
+    )
 
-    report("load")
-    # ttcIndex picks a face when the input is a TrueType Collection (ignored otherwise)
-    base = TTFont(mono_path, fontNumber=int(mp.get("ttcIndex", 0)))
-    cjk = TTFont(cjk_path, fontNumber=int(cp.get("ttcIndex", 0)))
 
-    # Subset the CJK input before instancing/merging: fewer glyphs downstream.
-    # The caller passes explicit codepoints; an empty list means "keep all".
-    subset_kept = None
-    subset_unicodes = (cp.get("subset") or {}).get("unicodes") or []
-    if subset_unicodes:
-        from fontTools import subset as ft_subset
+def _subset_cjk(cjk, p, report):
+    """Subset the CJK input before merging: fewer glyphs downstream.
 
-        report("subset")
-        opts = ft_subset.Options()
-        opts.name_IDs = ["*"]  # keep copyright/license records for name synthesis
-        opts.layout_features = ["*"]
-        subsetter = ft_subset.Subsetter(opts)
-        subsetter.populate(unicodes=subset_unicodes)
-        subsetter.subset(cjk)
-        subset_kept = len(cjk.getGlyphOrder())
+    The caller passes explicit codepoints; an empty list means "keep all".
+    Returns the kept glyph count, or None when no subset was applied.
+    """
+    if not p.subset_unicodes:
+        return None
+    from fontTools import subset as ft_subset
 
-    # Pin variable fonts to a static instance before merging (no axis merging).
-    # An empty location means "use the axis defaults".
-    variations = params.get("variations") or {}
-    if "fvar" in base or "fvar" in cjk:
-        from fontTools.varLib.instancer import instantiateVariableFont
+    report("subset")
+    opts = ft_subset.Options()
+    opts.name_IDs = ["*"]  # keep copyright/license records for name synthesis
+    opts.layout_features = ["*"]
+    subsetter = ft_subset.Subsetter(opts)
+    subsetter.populate(unicodes=p.subset_unicodes)
+    subsetter.subset(cjk)
+    return len(cjk.getGlyphOrder())
 
-        report("instance")
-        for tag, font in (("mono", base), ("cjk", cjk)):
-            if "fvar" in font:
-                instantiateVariableFont(font, variations.get(tag) or {}, inplace=True)
 
-    upem = base["head"].unitsPerEm
-    if "glyf" not in base:
-        # OTF / CFF (incl. CFF-based TTC) base: convert outlines to glyph
-        report("convert")
-        _to_glyf(base, upem)
-    cjk_upem = cjk["head"].unitsPerEm
-    units_per_px = upem / fs
+def _instance_variable_fonts(base, cjk, p, report):
+    """Pin variable fonts to a static instance (no axis merging).
 
-    base_cmap = base.getBestCmap()
-    cjk_cmap = cjk.getBestCmap()
-    base_hmtx = base["hmtx"]
-    base_glyf = base["glyf"]
-    base_glyphs = base.getGlyphSet()
-    cjk_glyphs = cjk.getGlyphSet()
-    cjk_glyf = cjk.get("glyf")
-    cjk_is_cff = "CFF " in cjk or "CFF2" in cjk
-    # vertical metrics are optional but must cover every glyph if the base has them
-    base_vmtx = base.get("vmtx")
-    cjk_vmtx = cjk.get("vmtx")
+    An empty location means "use the axis defaults".
+    """
+    if "fvar" not in base and "fvar" not in cjk:
+        return
+    from fontTools.varLib.instancer import instantiateVariableFont
 
+    report("instance")
+    for tag, font in (("mono", base), ("cjk", cjk)):
+        if "fvar" in font:
+            instantiateVariableFont(font, p.variations.get(tag) or {}, inplace=True)
+
+
+def _mono_reference_advance(base, base_cmap, upem):
+    """Advance of the mono reference glyph ("n", else "0", else half em)."""
     n_name = base_cmap.get(ord("n")) or base_cmap.get(ord("0"))
-    mono_ref_adv = base_hmtx[n_name][0] if n_name else upem // 2
-    cjk_adv_locked = round(2 * mono_ref_adv * mono_adv_mul)
+    return base["hmtx"][n_name][0] if n_name else upem // 2
 
-    # --- mono: adjust advances, and outlines only if scaled ---
-    if mono_adv_mul != 1 or mono_gsx != 1 or mono_gsy != 1 or mono_bl != 0:
-        report("mono")
-        for name in base.getGlyphOrder():
-            nat_adv = base_hmtx[name][0]
-            new_adv = round(nat_adv * mono_adv_mul)
-            if mono_gsx != 1 or mono_gsy != 1 or mono_bl != 0:
-                dx = (new_adv - nat_adv * mono_gsx) / 2
-                dy = -mono_bl * units_per_px
-                new_glyph = _pen_glyph(
-                    base_glyphs, name, mono_gsx, mono_gsy, dx, dy, upem
-                )
-                base_glyf[name] = new_glyph
-                new_glyph.recalcBounds(base_glyf)
-                lsb = new_glyph.xMin
-            else:
-                lsb = base_hmtx[name][1]
-            base_hmtx[name] = (new_adv, lsb)
 
-    # --- CJK: append scaled glyphs for codepoints mono doesn't cover ---
+def _adjust_mono_advances(base, p, upem, units_per_px, report):
+    """Scale mono advances, and redraw outlines only when scale/baseline moved."""
+    if p.mono_adv_mul == 1 and p.mono_gsx == 1 and p.mono_gsy == 1 and p.mono_bl == 0:
+        return
+    report("mono")
+    hmtx = base["hmtx"]
+    glyf = base["glyf"]
+    glyphs = base.getGlyphSet()
+    for name in base.getGlyphOrder():
+        nat_adv = hmtx[name][0]
+        new_adv = round(nat_adv * p.mono_adv_mul)
+        if p.mono_gsx != 1 or p.mono_gsy != 1 or p.mono_bl != 0:
+            dx = (new_adv - nat_adv * p.mono_gsx) / 2
+            dy = -p.mono_bl * units_per_px
+            new_glyph = _pen_glyph(glyphs, name, p.mono_gsx, p.mono_gsy, dx, dy, upem)
+            glyf[name] = new_glyph
+            new_glyph.recalcBounds(glyf)
+            lsb = new_glyph.xMin
+        else:
+            lsb = hmtx[name][1]
+        hmtx[name] = (new_adv, lsb)
+
+
+def _append_cjk(
+    base,
+    cjk,
+    p,
+    cjk_cmap,
+    base_cmap,
+    upem,
+    cjk_adv_locked,
+    cjk_scale,
+    units_per_px,
+    report,
+):
+    """Append scaled CJK glyphs for codepoints the mono base doesn't cover.
+
+    Returns (added_count, added_cmap); added_cmap maps codepoint -> glyph name
+    so the cmap step can reuse it instead of re-scanning the glyph order.
+    """
     report("cjk", 0)
     existing = set(base.getGlyphOrder())
-    cjk_scale = upem / cjk_upem
+    glyf = base["glyf"]
+    hmtx = base["hmtx"]
+    glyphs = cjk.getGlyphSet()
+    cjk_glyf = cjk.get("glyf")
+    cjk_is_cff = "CFF " in cjk or "CFF2" in cjk
+    cjk_vmtx = cjk.get("vmtx")
+    vmtx = base.get("vmtx")
     added = 0
+    added_cmap = {}
     total = sum(1 for c in cjk_cmap if c not in base_cmap)
     for cpnt, cname in cjk_cmap.items():
         if cpnt in base_cmap:
             continue
         gname = f"cjk.{cpnt:04X}"
         if gname in existing:
+            # Name collision with a pre-existing glyph: keep it mapped, as the
+            # cmap union below used to (without counting it as newly added).
+            added_cmap[cpnt] = gname
             continue
-        nat_adv = cjk_glyphs[cname].width
+        nat_adv = glyphs[cname].width
         scaled_nat = nat_adv * cjk_scale
-        new_adv = cjk_adv_locked if lock else round(scaled_nat * cjk_adv_mul)
-        dx = (new_adv - scaled_nat * cjk_gsx) / 2
-        dy = -cjk_bl * units_per_px
-        sx = cjk_scale * cjk_gsx
-        sy = cjk_scale * cjk_gsy
+        new_adv = cjk_adv_locked if p.lock else round(scaled_nat * p.cjk_adv_mul)
+        dx = (new_adv - scaled_nat * p.cjk_gsx) / 2
+        dy = -p.cjk_bl * units_per_px
+        sx = cjk_scale * p.cjk_gsx
+        sy = cjk_scale * p.cjk_gsy
         g = None
         if cjk_glyf is not None:
             g = _move_glyf_glyph(cjk_glyf, cname, sx, sy, dx, dy)
         if g is None:
-            g = _pen_glyph(cjk_glyphs, cname, sx, sy, dx, dy, upem, cjk_is_cff)
+            g = _pen_glyph(glyphs, cname, sx, sy, dx, dy, upem, cjk_is_cff)
         # glyf.__setitem__ appends to glyphOrder itself (O(1) via its reverse map);
         # appending again here would force a rebuild every iteration (O(n^2)).
-        base_glyf[gname] = g
-        base_hmtx[gname] = (new_adv, getattr(g, "xMin", 0))
-        if base_vmtx is not None:
+        glyf[gname] = g
+        hmtx[gname] = (new_adv, getattr(g, "xMin", 0))
+        if vmtx is not None:
             v_adv = upem
             if cjk_vmtx is not None and cname in cjk_vmtx.metrics:
                 v_adv = round(cjk_vmtx[cname][0] * cjk_scale)
-            base_vmtx[gname] = (v_adv, 0)
+            vmtx[gname] = (v_adv, 0)
         existing.add(gname)
+        added_cmap[cpnt] = gname
         added += 1
         if total and added % 2000 == 0:
             report("cjk", min(99, int(added * 100 / total)))
-
     report("cjk", 100)
-    # --- cmap: union of CJK codepoints (format 4 = BMP only, format 12 = all) ---
-    report("cmap")
-    added_cmap = {}
-    for cpnt in cjk_cmap:
-        gname = f"cjk.{cpnt:04X}"
-        if gname in existing:
-            added_cmap[cpnt] = gname
+    return added, added_cmap
 
+
+def _merge_cmap(base, base_cmap, added_cmap, report):
+    """Union the CJK codepoints into the base cmap (format 4 = BMP, 12 = all)."""
+    report("cmap")
     bmp = {c: g for c, g in added_cmap.items() if c <= 0xFFFF}
     has_fmt12 = False
     for table in base["cmap"].tables:
@@ -286,9 +350,11 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         sub.cmap.update(added_cmap)
         base["cmap"].tables.append(sub)
 
-    # --- name ---
-    fam = params.get("familyName", "CJKonospace")
-    style = params.get("styleName", "Regular")
+
+def _synthesize_names(base, cjk, p):
+    """Overwrite the output name records, keeping both inputs' attribution."""
+    fam = p.family
+    style = p.style
     full = f"{fam} {style}"
     ps = full.replace(" ", "")
     nt = base["name"]
@@ -367,14 +433,21 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         )
     ]
 
-    # --- monospace metadata: terminals/editors rely on these flags ---
+
+def _update_metrics(base, p, mono_ref_adv, report):
+    """Set monospace/coverage flags that depend on the final merged font."""
     report("metrics")
     if "post" in base:
         base["post"].isFixedPitch = 1
     if "OS/2" in base:
         os2 = base["OS/2"]
         os2.panose.bProportion = 9  # monospace
-        os2.xAvgCharWidth = round(mono_ref_adv * mono_adv_mul)
+        os2.xAvgCharWidth = round(mono_ref_adv * p.mono_adv_mul)
+        # The style name is freely typed; reflect a recognized weight word or
+        # number in usWeightClass (leave the base's value when unrecognized).
+        weight = _weight_from_style(p.style)
+        if weight is not None:
+            os2.usWeightClass = weight
         # Recompute the coverage flags from the merged cmap: the mono base's
         # values no longer describe the appended CJK glyphs. fontTools helpers
         # (>= 4.44) keep the base's ranges and add the CJK ones.
@@ -382,11 +455,15 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         os2.recalcCodePageRanges(base)
         os2.updateFirstAndLastCharIndex(base)
 
-    # --- vertical metrics: from both fonts' declared hhea, times lineHeight ---
-    # (mirrored exactly by the web preview, which reads ascender/descender via
-    # opentype.js; the mono base's own metrics may not fit the scaled CJK)
-    multiplier = float(params.get("lineHeight", 1.3))
-    bl_units = cjk_bl * units_per_px
+
+def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
+    """Derive asc/desc from both fonts' hhea, times lineHeight.
+
+    Mirrored exactly by the web preview, which reads ascender/descender via
+    opentype.js; the mono base's own metrics may not fit the scaled CJK.
+    """
+    multiplier = p.line_height
+    bl_units = p.cjk_bl * units_per_px
     if "hhea" in cjk:
         cjk_asc = cjk["hhea"].ascent * cjk_scale + bl_units
         cjk_desc = cjk["hhea"].descent * cjk_scale + bl_units
@@ -411,33 +488,84 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         os2.usWinAscent = ascender
         os2.usWinDescent = -descender
 
-    # --- gasp: let Windows grid-fit/antialias mixed hinted/unhinted glyphs ---
-    if "gasp" not in base:
-        from fontTools.ttLib import newTable
-        from fontTools.ttLib.tables._g_a_s_p import (
-            GASP_DOGRAY,
-            GASP_GRIDFIT,
-            GASP_SYMMETRIC_GRIDFIT,
-            GASP_SYMMETRIC_SMOOTHING,
-        )
 
-        gasp = newTable("gasp")
-        gasp.version = 1
-        gasp.gaspRange = {
-            0xFFFF: GASP_SYMMETRIC_GRIDFIT
-            | GASP_SYMMETRIC_SMOOTHING
-            | GASP_DOGRAY
-            | GASP_GRIDFIT
-        }
-        base["gasp"] = gasp
+def _ensure_gasp(base):
+    """Let Windows grid-fit/antialias mixed hinted/unhinted glyphs."""
+    if "gasp" in base:
+        return
+    from fontTools.ttLib import newTable
+    from fontTools.ttLib.tables._g_a_s_p import (
+        GASP_DOGRAY,
+        GASP_GRIDFIT,
+        GASP_SYMMETRIC_GRIDFIT,
+        GASP_SYMMETRIC_SMOOTHING,
+    )
+
+    gasp = newTable("gasp")
+    gasp.version = 1
+    gasp.gaspRange = {
+        0xFFFF: GASP_SYMMETRIC_GRIDFIT
+        | GASP_SYMMETRIC_SMOOTHING
+        | GASP_DOGRAY
+        | GASP_GRIDFIT
+    }
+    base["gasp"] = gasp
+
+
+def merge(mono_path, cjk_path, out_path, params, progress=None):
+    def report(stage, value=None):
+        if progress:
+            progress(stage, value)
+
+    p = _read_params(params)
+
+    report("load")
+    # ttcIndex picks a face when the input is a TrueType Collection (ignored otherwise)
+    base = TTFont(mono_path, fontNumber=p.mono_ttc_index)
+    cjk = TTFont(cjk_path, fontNumber=p.cjk_ttc_index)
+
+    subset_kept = _subset_cjk(cjk, p, report)
+    _instance_variable_fonts(base, cjk, p, report)
+
+    upem = base["head"].unitsPerEm
+    if "glyf" not in base:
+        # OTF / CFF (incl. CFF-based TTC) base: convert outlines to glyph
+        report("convert")
+        _to_glyf(base, upem)
+    cjk_upem = cjk["head"].unitsPerEm
+    units_per_px = upem / p.fs
+    cjk_scale = upem / cjk_upem
+
+    base_cmap = base.getBestCmap()
+    cjk_cmap = cjk.getBestCmap()
+    mono_ref_adv = _mono_reference_advance(base, base_cmap, upem)
+    cjk_adv_locked = round(2 * mono_ref_adv * p.mono_adv_mul)
+
+    _adjust_mono_advances(base, p, upem, units_per_px, report)
+    added, added_cmap = _append_cjk(
+        base,
+        cjk,
+        p,
+        cjk_cmap,
+        base_cmap,
+        upem,
+        cjk_adv_locked,
+        cjk_scale,
+        units_per_px,
+        report,
+    )
+    _merge_cmap(base, base_cmap, added_cmap, report)
+    _synthesize_names(base, cjk, p)
+    _update_metrics(base, p, mono_ref_adv, report)
+    _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
+    _ensure_gasp(base)
 
     report("save")
-    fmt = str(params.get("format", "ttf")).lower()
-    if fmt == "woff2":
+    if p.fmt == "woff2":
         base.flavor = "woff2"  # brotli-compressed packaging of the same TTF
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
-    return {"added": added, "upem": upem, "format": fmt, "subset_kept": subset_kept}
+    return {"added": added, "upem": upem, "format": p.fmt, "subset_kept": subset_kept}
 
 
 if __name__ == "__main__":
