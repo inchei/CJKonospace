@@ -262,7 +262,7 @@ def _read_params(params):
         family=params.get("familyName", "CJKonospace"),
         # empty means "unset": follow the mono base's own subfamily
         style=str(params.get("styleName") or "").strip(),
-        line_height=float(params.get("lineHeight", 1.3)),
+        line_height=float(params.get("lineHeight", 1.0)),
         fmt=str(params.get("format", "ttf")).lower(),
     )
 
@@ -558,8 +558,12 @@ def _update_metrics(base, p, mono_ref_adv, report):
 def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
     """Derive asc/desc from both fonts' hhea, times lineHeight.
 
-    Mirrored exactly by the web preview, which reads ascender/descender via
-    opentype.js; the mono base's own metrics may not fit the scaled CJK.
+    lineGap is forced to 0 (terminals interpret a positive gap inconsistently:
+    ignored, split 50/50, or added above/below), so the line box comes only
+    from ascender/descender. The web preview mirrors this.
+    See:
+    - https://github.com/arrowtype/vertical-metrics
+    - https://github.com/githubnext/monaspace/pull/227
     """
     multiplier = p.line_height
     bl_units = p.cjk_bl * units_per_px
@@ -580,10 +584,12 @@ def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
     if "hhea" in base:
         base["hhea"].ascent = ascender
         base["hhea"].descent = descender
+        base["hhea"].lineGap = 0
     if "OS/2" in base:
         os2 = base["OS/2"]
         os2.sTypoAscender = ascender
         os2.sTypoDescender = descender
+        os2.sTypoLineGap = 0
         os2.usWinAscent = ascender
         os2.usWinDescent = -descender
 

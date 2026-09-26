@@ -223,7 +223,8 @@ export function renderPreview(
   }
 
   // Vertical metrics, mirroring merge_font.py: the generated ascent/descent come
-  // from both fonts' declared hhea ascender/descender (times lineHeight).
+  // from both fonts' declared hhea ascender/descender (times lineHeight), with
+  // lineGap forced to 0. See wasm/merge_font.py:_update_vertical_metrics.
   const metricTop = Math.max(
     monoFont
       ? monoFont.meta.ascender * (fs / monoFont.meta.unitsPerEm)
