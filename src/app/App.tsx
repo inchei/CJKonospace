@@ -39,6 +39,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { LANGS } from "@/lib/i18n";
@@ -1118,22 +1119,27 @@ export default function App() {
                           className="pb-2"
                         />
                       </div>
-                      <label className="flex flex-col gap-1 text-xs font-base">
+                      <div className="flex flex-col gap-1 text-xs font-base">
                         <span className="font-heading">{t("gen.format")}</span>
-                        <select
-                          className="w-full min-w-0 rounded-base border-2 border-border bg-secondary-background px-2 py-1.5 text-xs font-base shadow-shadow"
+                        <RadioGroup
+                          className="flex flex-row gap-4"
                           value={advFormat}
-                          onChange={(e) =>
-                            setAdvFormat(
-                              e.target.value === "woff2" ? "woff2" : "ttf",
-                            )
+                          onValueChange={(v) =>
+                            setAdvFormat(v === "woff2" ? "woff2" : "ttf")
                           }
                           aria-label={t("gen.format")}
                         >
-                          <option value="ttf">TTF</option>
-                          <option value="woff2">WOFF2</option>
-                        </select>
-                      </label>
+                          {(["ttf", "woff2"] as const).map((f) => (
+                            <label
+                              key={f}
+                              className="flex items-center gap-2 font-base"
+                            >
+                              <RadioGroupItem value={f} />
+                              {f.toUpperCase()}
+                            </label>
+                          ))}
+                        </RadioGroup>
+                      </div>
                     </div>
                   </AccordionContent>
                 </AccordionItem>
