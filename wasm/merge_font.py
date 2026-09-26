@@ -372,8 +372,15 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     if "post" in base:
         base["post"].isFixedPitch = 1
     if "OS/2" in base:
-        base["OS/2"].panose.bProportion = 9  # monospace
-        base["OS/2"].xAvgCharWidth = round(mono_ref_adv * mono_adv_mul)
+        os2 = base["OS/2"]
+        os2.panose.bProportion = 9  # monospace
+        os2.xAvgCharWidth = round(mono_ref_adv * mono_adv_mul)
+        # Recompute the coverage flags from the merged cmap: the mono base's
+        # values no longer describe the appended CJK glyphs. fontTools helpers
+        # (>= 4.44) keep the base's ranges and add the CJK ones.
+        os2.recalcUnicodeRanges(base)
+        os2.recalcCodePageRanges(base)
+        os2.updateFirstAndLastCharIndex(base)
 
     # --- vertical metrics: from both fonts' declared hhea, times lineHeight ---
     # (mirrored exactly by the web preview, which reads ascender/descender via
