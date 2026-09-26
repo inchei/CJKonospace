@@ -659,6 +659,7 @@ export default function App() {
                 instanceLabel={t("load.instance")}
                 onAxis={(tag, v) => setAxis("cjk", tag, v)}
                 onInstance={(c) => setInstance("cjk", c)}
+                vfWarningLabel={t("load.vfWarning")}
               />
               <FontSlotInfo
                 label={t("load.mono")}
@@ -672,6 +673,7 @@ export default function App() {
                 instanceLabel={t("load.instance")}
                 onAxis={(tag, v) => setAxis("mono", tag, v)}
                 onInstance={(c) => setInstance("mono", c)}
+                vfWarningLabel={t("load.vfWarning")}
                 presetLabel={t("load.preset")}
                 presetPlaceholder={t("load.presetPlaceholder")}
                 downloadingLabel={t("load.downloading")}
@@ -796,6 +798,11 @@ export default function App() {
               <CardDescription>{t("gen.desc")}</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
+              {(!mono.font || !cjk.font) && gen.status !== "running" && (
+                <p className="text-xs font-base opacity-70">
+                  {t("gen.needBoth")}
+                </p>
+              )}
               <Button
                 className={WRAP_BTN}
                 onClick={handleGenerate}
@@ -805,12 +812,6 @@ export default function App() {
                   ? t("gen.generating")
                   : t("gen.button")}
               </Button>
-
-              {(!mono.font || !cjk.font) && gen.status !== "running" && (
-                <p className="text-xs font-base opacity-70">
-                  {t("gen.needBoth")}
-                </p>
-              )}
 
               {gen.status === "running" && (
                 <p className="text-xs font-base" aria-live="polite">
@@ -915,6 +916,7 @@ function FontSlotInfo({
   instanceLabel,
   onAxis,
   onInstance,
+  vfWarningLabel,
   presets,
   presetLabel,
   presetPlaceholder,
@@ -932,6 +934,7 @@ function FontSlotInfo({
   instanceLabel?: string;
   onAxis?: (tag: string, value: number) => void;
   onInstance?: (coords: Record<string, number>) => void;
+  vfWarningLabel?: string;
   presets?: MonoPreset[];
   presetLabel?: string;
   presetPlaceholder?: string;
@@ -1041,6 +1044,9 @@ function FontSlotInfo({
       </div>
       {variation && variation.axes.length > 0 && (
         <div className="flex flex-col gap-2 rounded-base border-2 border-border bg-secondary-background p-2">
+          <Badge className="bg-main text-black whitespace-normal">
+            {vfWarningLabel}
+          </Badge>
           {variation.instances.length > 0 && (
             <label className="flex flex-col gap-1 text-xs font-base">
               <span className="font-heading">{instanceLabel}</span>

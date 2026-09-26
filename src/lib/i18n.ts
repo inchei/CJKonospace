@@ -26,6 +26,8 @@ const zhHant = {
     woff2: "下載 WOFF2 解壓依賴…",
     ttcFace: "TTC 子字體",
     instance: "內建實例",
+    vfWarning:
+      "⚠ 可變字體在瀏覽器生成耗時較長，建議僅瀏覽或下載 build.py 本地生成",
   },
   params: {
     title: "參數",
@@ -63,8 +65,8 @@ const zhHant = {
     download: "下載 TTF",
     downloadWoff2: "下載 WOFF2",
     compressing: "壓縮中…",
-    exportBuild: "導出獨立 build.py（僅需 fontTools）",
-    cliHint: "本地生成：python build.py mono.ttf cjk.ttf [out.ttf]",
+    exportBuild: "導出獨立 build.py",
+    cliHint: "本地生成：uv run build.py mono.ttf cjk.ttf [out.ttf]",
     testLabel: "測試生成的字體",
     testHint: "在此輸入文字，即時預覽生成的字體",
   },
@@ -114,6 +116,8 @@ void i18next
             woff2: "下载 WOFF2 解压依赖…",
             ttcFace: "TTC 子字体",
             instance: "内置实例",
+            vfWarning:
+              "⚠ 可变字体在浏览器生成耗时较长，建议仅浏览或下载 build.py 本地生成",
           },
           params: {
             title: "参数",
@@ -151,8 +155,8 @@ void i18next
             download: "下载 TTF",
             downloadWoff2: "下载 WOFF2",
             compressing: "压缩中…",
-            exportBuild: "导出独立 build.py（仅需 fontTools）",
-            cliHint: "本地生成：python build.py mono.ttf cjk.ttf [out.ttf]",
+            exportBuild: "导出独立 build.py",
+            cliHint: "本地生成：uv run build.py mono.ttf cjk.ttf [out.ttf]",
             testLabel: "测试生成的字体",
             testHint: "在此输入文字，实时预览生成的字体",
           },
@@ -180,6 +184,8 @@ void i18next
             woff2: "WOFF2 解凍ライブラリを取得中…",
             ttcFace: "TTC フェイス",
             instance: "組み込みインスタンス",
+            vfWarning:
+              "⚠ 可変フォントはブラウザでの生成に時間がかかるため、プレビューのみの利用か build.py のダウンロードによるローカル生成を推奨します",
           },
           params: {
             title: "パラメータ",
@@ -221,8 +227,8 @@ void i18next
             download: "TTF をダウンロード",
             downloadWoff2: "WOFF2 をダウンロード",
             compressing: "圧縮中…",
-            exportBuild: "スタンドアロン build.py を書き出す（fontTools のみ）",
-            cliHint: "ローカル生成：python build.py mono.ttf cjk.ttf [out.ttf]",
+            exportBuild: "スタンドアロン build.py を書き出す",
+            cliHint: "ローカル生成：uv run build.py mono.ttf cjk.ttf [out.ttf]",
             testLabel: "生成したフォントを試す",
             testHint: "ここに入力して生成フォントをプレビュー",
           },
@@ -250,6 +256,8 @@ void i18next
             woff2: "WOFF2 해제 라이브러리 내려받는 중…",
             ttcFace: "TTC 페이스",
             instance: "내장 인스턴스",
+            vfWarning:
+              "⚠ 가변 폰트는 브라우저에서 생성에 시간이 오래 걸리므로, 미리보기로만 사용하거나 build.py를 다운로드하여 로컬에서 생성하시기 바랍니다",
           },
           params: {
             title: "매개변수",
@@ -287,8 +295,8 @@ void i18next
             download: "TTF 다운로드",
             downloadWoff2: "WOFF2 다운로드",
             compressing: "압축 중…",
-            exportBuild: "독립 실행 build.py 내보내기(fontTools만 필요)",
-            cliHint: "로컬 생성: python build.py mono.ttf cjk.ttf [out.ttf]",
+            exportBuild: "독립 실행 build.py 내보내기",
+            cliHint: "로컬 생성: uv run build.py mono.ttf cjk.ttf [out.ttf]",
             testLabel: "생성된 폰트 테스트",
             testHint: "여기에 입력하여 생성된 폰트를 미리보기",
           },
