@@ -40,7 +40,14 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
   "format": "ttf",
   "variations": { "mono": {}, "cjk": {} },
   "mono": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0, "ttcIndex": 0 },
-  "cjk": { "advMul": 1, "gsx": 1, "gsy": 1, "baseline": 0, "ttcIndex": 0 }
+  "cjk": {
+    "advMul": 1,
+    "gsx": 1,
+    "gsy": 1,
+    "baseline": 0,
+    "ttcIndex": 0,
+    "subset": { "unicodes": [19968, 19969] }
+  }
 }
 ```
 
@@ -55,12 +62,14 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
 | `mono` / `cjk.baseline`    | baseline offset in px (see `fs`)                                                          |
 | `mono` / `cjk.ttcIndex`    | face index when the input is a `.ttc` collection (default `0`)                            |
 | `variations.mono` / `.cjk` | variable-font instance location (axis tag → value), e.g. `{ "wght": 700 }`                |
+| `cjk.subset`               | keep only these codepoints in the CJK input, e.g. `{ "unicodes": [19968] }` (omit = full) |
 
 Notes:
 
 - Inputs may be TTF, OTF or WOFF2 (WOFF2 is decompressed first; the CLI declares the `brotli` dependency for this).
 - TTC collections are supported: pick a face with `ttcIndex` (default `0`). The web UI shows a face selector for multi-face collections and defaults to the face matching the UI language (e.g. `TC` for `zh-Hant`).
 - Variable-font inputs are pinned to a static instance via `variations.mono` / `variations.cjk` (fontTools `varLib.instancer`); axes are not merged into a variable output. The web UI exposes per-axis sliders and the font's named instances.
+- The CJK input can be subset with `cjk.subset.unicodes` (fontTools `subset`, applied before instancing/merging). The web UI offers presets (GBK, Big5, JIS X 0208, KS X 1001, 通用规范 3500/6500/8105) plus custom text; the preview simulates the subset, rendering excluded characters as .notdef.
 - Output outlines are always TrueType (`glyf`); set `format: "woff2"` to get a WOFF2 package of the same font. A CFF/OTF mono base is converted (cu2qu; CFF hinting is dropped).
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.
 - Vertical metrics (`hhea` ascent/descent, `OS/2` typo + win metrics) are recomputed to cover every glyph, so tall CJK glyphs are not clipped.

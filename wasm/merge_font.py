@@ -147,6 +147,22 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     base = TTFont(mono_path, fontNumber=int(mp.get("ttcIndex", 0)))
     cjk = TTFont(cjk_path, fontNumber=int(cp.get("ttcIndex", 0)))
 
+    # Subset the CJK input before instancing/merging: fewer glyphs downstream.
+    # The caller passes explicit codepoints; an empty list means "keep all".
+    subset_kept = None
+    subset_unicodes = (cp.get("subset") or {}).get("unicodes") or []
+    if subset_unicodes:
+        from fontTools import subset as ft_subset
+
+        report("subset")
+        opts = ft_subset.Options()
+        opts.name_IDs = ["*"]  # keep copyright/license records for name synthesis
+        opts.layout_features = ["*"]
+        subsetter = ft_subset.Subsetter(opts)
+        subsetter.populate(unicodes=subset_unicodes)
+        subsetter.subset(cjk)
+        subset_kept = len(cjk.getGlyphOrder())
+
     # Pin variable fonts to a static instance before merging (no axis merging).
     # An empty location means "use the axis defaults".
     variations = params.get("variations") or {}
@@ -368,7 +384,7 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         base.flavor = "woff2"  # brotli-compressed packaging of the same TTF
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
-    return {"added": added, "upem": upem, "format": fmt}
+    return {"added": added, "upem": upem, "format": fmt, "subset_kept": subset_kept}
 
 
 if __name__ == "__main__":

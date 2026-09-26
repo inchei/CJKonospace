@@ -6,6 +6,15 @@ import { loadFont, type LoadedFont } from "@/fontLoader";
 import { isWoff2, toSfnt, toWoff2 } from "@/woff2";
 import { inspectTTC, isTTC, type TTCFace } from "@/ttc";
 import { DEFAULT_PARAMS, type Params } from "@/params";
+import {
+  SUBSET_DEFAULT,
+  SUBSET_PRESETS,
+  estimateKept,
+  loadCharsets,
+  resolveUnicodes,
+  type SubsetPresetId,
+  type SubsetState,
+} from "@/lib/subset";
 import { renderPreview } from "@/preview";
 import { ensureShaping, shapeMonoRun } from "@/shaper";
 import { generateFont, type ExportProgress } from "@/exporter";
@@ -20,6 +29,12 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -298,6 +313,34 @@ export default function App() {
     busy: false,
     error: null,
   });
+  // CJK subset: preset ranges + custom text, resolved to codepoints lazily
+  const [subset, setSubset] = useState<SubsetState>(SUBSET_DEFAULT);
+  const [subsetUnicodes, setSubsetUnicodes] = useState<number[] | null>(null);
+  const [subsetEstimate, setSubsetEstimate] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (subset.presets.length === 0 && subset.text === "") {
+      setSubsetUnicodes([]);
+      setSubsetEstimate(null);
+      return;
+    }
+    (async () => {
+      const charsets = await loadCharsets();
+      if (cancelled) return;
+      const unicodes = resolveUnicodes(charsets, subset);
+      if (cancelled) return;
+      setSubsetUnicodes(unicodes);
+      setSubsetEstimate(
+        cjk.font && unicodes.length > 0
+          ? estimateKept(cjk.font, unicodes)
+          : null,
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subset, cjk.font]);
 
   useEffect(
     () => () => {
@@ -332,6 +375,9 @@ export default function App() {
         gsy: params.cjkGlyphScaleY,
         baseline: params.cjkBaselineOffset,
         ttcIndex: cjk.ttc?.index ?? 0,
+        ...(subsetUnicodes && subsetUnicodes.length > 0
+          ? { subset: { unicodes: subsetUnicodes } }
+          : {}),
       },
       // static instance location per font; {} means "keep as-is"
       variations: { mono: mono.coords, cjk: cjk.coords },
@@ -429,12 +475,13 @@ export default function App() {
           overrides: {},
           monoCoords: mono.coords,
           cjkCoords: cjk.coords,
+          subsetUnicodes,
           shapeMono: (font, text) => shapeMonoRun(font, text, mono.coords),
         },
         { showGrid, hint: t("previewHint") },
       );
     }
-  }, [cjk, mono, params, showGrid, t]);
+  }, [cjk, mono, params, showGrid, t, subsetUnicodes]);
 
   useEffect(draw, [draw, showGrid]);
 
@@ -560,6 +607,7 @@ export default function App() {
     if (stage === "runtime") return t("gen.stageRuntime");
     if (stage === "packages") return t("gen.stagePackages");
     if (stage === "instance") return t("gen.stageInstance");
+    if (stage === "subset") return t("gen.stageSubset");
     if (stage === "convert") return t("gen.stageConvert");
     if (stage === "cjk") return t("gen.stageMerge");
     if (stage === "cmap") return t("gen.stageCmap");
@@ -660,6 +708,32 @@ export default function App() {
                 onAxis={(tag, v) => setAxis("cjk", tag, v)}
                 onInstance={(c) => setInstance("cjk", c)}
                 vfWarningLabel={t("load.vfWarning")}
+                subset={{
+                  label: t("subset.label"),
+                  presets: SUBSET_PRESETS.map((id) => ({
+                    id,
+                    label: t(`subset.p_${id}`),
+                  })),
+                  state: subset,
+                  estimate:
+                    subsetEstimate !== null
+                      ? t("subset.estimate", {
+                          count: subsetEstimate.toLocaleString(lang),
+                        })
+                      : null,
+                  customLabel: t("subset.custom"),
+                  fillLabel: t("subset.fill"),
+                  onChange: (patch) => setSubset((s) => ({ ...s, ...patch })),
+                  onTogglePreset: (id) =>
+                    setSubset((s) => ({
+                      ...s,
+                      presets: s.presets.includes(id)
+                        ? s.presets.filter((p) => p !== id)
+                        : [...s.presets, id],
+                    })),
+                  onFillSample: () =>
+                    setSubset((s) => ({ ...s, text: params.text })),
+                }}
               />
               <FontSlotInfo
                 label={t("load.mono")}
@@ -917,6 +991,7 @@ function FontSlotInfo({
   onAxis,
   onInstance,
   vfWarningLabel,
+  subset,
   presets,
   presetLabel,
   presetPlaceholder,
@@ -935,6 +1010,17 @@ function FontSlotInfo({
   onAxis?: (tag: string, value: number) => void;
   onInstance?: (coords: Record<string, number>) => void;
   vfWarningLabel?: string;
+  subset?: {
+    label: string;
+    presets: { id: SubsetPresetId; label: string }[];
+    state: SubsetState;
+    estimate: string | null;
+    customLabel: string;
+    fillLabel: string;
+    onChange: (patch: Partial<SubsetState>) => void;
+    onTogglePreset: (id: SubsetPresetId) => void;
+    onFillSample: () => void;
+  };
   presets?: MonoPreset[];
   presetLabel?: string;
   presetPlaceholder?: string;
@@ -994,6 +1080,56 @@ function FontSlotInfo({
             ))}
           </select>
         </label>
+      )}
+      {subset && (
+        <Accordion>
+          <AccordionItem value="subset" disabled={slot.busy}>
+            <AccordionTrigger className="p-2 text-xs">
+              {subset.label}
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="flex flex-col gap-2">
+                {subset.presets.map((p) => (
+                  <label
+                    key={p.id}
+                    className="flex items-center gap-2 text-xs font-base"
+                  >
+                    <Checkbox
+                      checked={subset.state.presets.includes(p.id)}
+                      disabled={slot.busy}
+                      onCheckedChange={() => subset.onTogglePreset(p.id)}
+                      aria-label={p.label}
+                    />
+                    {p.label}
+                  </label>
+                ))}
+                {subset.estimate && (
+                  <p className="text-xs font-base opacity-70">
+                    {subset.estimate}
+                  </p>
+                )}
+                <label className="flex flex-col gap-1 text-xs font-base">
+                  <span className="font-heading">{subset.customLabel}</span>
+                  <Textarea
+                    rows={2}
+                    value={subset.state.text}
+                    disabled={slot.busy}
+                    onChange={(e) => subset.onChange({ text: e.target.value })}
+                  />
+                </label>
+                <Button
+                  variant="neutral"
+                  size="sm"
+                  className={WRAP_BTN}
+                  onClick={subset.onFillSample}
+                  disabled={slot.busy}
+                >
+                  {subset.fillLabel}
+                </Button>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
       )}
       {presets && onPreset && (
         <label className="flex flex-col gap-1 text-xs font-base">

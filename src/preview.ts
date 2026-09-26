@@ -16,6 +16,12 @@ export interface RenderInput {
   monoCoords?: Record<string, number>;
   cjkCoords?: Record<string, number>;
   /**
+   * CJK subset being generated (null/empty = full font). Characters outside
+   * the subset fall through to the mono path, matching the merge output:
+   * the mono glyph shows when the mono font has it, otherwise .notdef.
+   */
+  subsetUnicodes?: number[] | null;
+  /**
    * Shape one mono-font run. Return null to fall back to per-char layout
    * (e.g. harfbuzz still loading). CJK runs are always laid out per char.
    */
@@ -284,11 +290,17 @@ export function renderPreview(
   const lines = params.text.split("\n");
   const drawItems: DrawItem[][] = lines.map((ln) => {
     const chars = [...ln];
-    const slots: Slot[] = chars.map((ch) =>
-      cjkFont && isCJK(ch) && cjkFont.font.charToGlyphIndex(ch) > 0
-        ? "cjk"
-        : "mono",
-    );
+    const subset =
+      input.subsetUnicodes && input.subsetUnicodes.length > 0
+        ? new Set(input.subsetUnicodes)
+        : null;
+    const slots: Slot[] = chars.map((ch) => {
+      if (!cjkFont || !isCJK(ch)) return "mono";
+      const cp = ch.codePointAt(0);
+      // a subset-excluded character is absent from the merge output
+      if (subset && (cp === undefined || !subset.has(cp))) return "mono";
+      return cjkFont.font.charToGlyphIndex(ch) > 0 ? "cjk" : "mono";
+    });
     const out: DrawItem[] = [];
     let i = 0;
     while (i < chars.length) {
