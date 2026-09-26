@@ -31,10 +31,8 @@ from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._g_l_y_f import Glyph
 
-# Style-name keywords -> OS/2 usWeightClass. Compound forms are listed before
-# the plain ones so "ExtraBold"/"SemiBold" are not captured as "Bold"; matched
-# against a lowercased, whitespace-normalized style name (word boundaries keep
-# e.g. "highlight" from matching "light").
+# Style-name keywords -> OS/2 usWeightClass. Compound forms first so
+# "ExtraBold"/"SemiBold" are not matched as "Bold".
 _WEIGHT_PATTERNS = (
     (r"\bextra\s*black\b|\bultra\s*black\b", 950),
     (r"\bextra\s*bold\b|\bultra\s*bold\b", 800),
@@ -49,16 +47,28 @@ _WEIGHT_PATTERNS = (
     (r"\bblack\b|\bheavy\b", 900),
 )
 
+# Style-name keywords -> OS/2 usWidthClass (1 = Ultra-condensed ... 9 =
+# Ultra-expanded). Compound forms first.
+_WIDTH_PATTERNS = (
+    (r"\bultra\s*condensed\b", 1),
+    (r"\bextra\s*condensed\b", 2),
+    (r"\bsemi\s*condensed\b", 4),
+    (r"\bcondensed\b|\bnarrow\b", 3),
+    (r"\bsemi\s*expanded\b", 6),
+    (r"\bextra\s*expanded\b", 8),
+    (r"\bultra\s*expanded\b", 9),
+    (r"\bexpanded\b|\bwide\b", 7),
+)
+
+
+def _normalize_style(style):
+    """Lowercase a style name and reduce separators to single spaces."""
+    return re.sub(r"[^0-9a-z]+", " ", style.lower()).strip()
+
 
 def _weight_from_style(style):
-    """Infer an OS/2 usWeightClass from a freely-typed style name.
-
-    Recognizes the common CSS/OpenType weight keywords (compound forms like
-    "ExtraBold" or "Extra Bold" included) and, failing that, a bare numeric
-    weight (e.g. "700"). Returns None when nothing recognizable is present so
-    the caller can keep the source font's value.
-    """
-    normalized = re.sub(r"[^0-9a-z]+", " ", style.lower()).strip()
+    """Infer an OS/2 usWeightClass from a freely-typed style name, or None."""
+    normalized = _normalize_style(style)
     if not normalized:
         return None
     for pattern, weight in _WEIGHT_PATTERNS:
@@ -66,6 +76,68 @@ def _weight_from_style(style):
             return weight
     found = re.search(r"\b(?:[1-9][0-9]{2}|1000)\b", normalized)
     return int(found.group(0)) if found else None
+
+
+def _width_from_style(style):
+    """Infer an OS/2 usWidthClass from a freely-typed style name, or None."""
+    normalized = _normalize_style(style)
+    for pattern, width in _WIDTH_PATTERNS:
+        if re.search(pattern, normalized):
+            return width
+    return None
+
+
+def _sync_subfamily_style(base, style):
+    """Sync usWeightClass/usWidthClass, fsSelection and head.macStyle from the
+    freely-typed subfamily; unrecognized names keep the base values. Style-bit
+    rules follow the OpenType name examples:
+    https://learn.microsoft.com/en-us/typography/opentype/spec/namesmp
+    """
+    normalized = _normalize_style(style)
+    weight = _weight_from_style(style)
+    width = _width_from_style(style)
+    italic = bool(re.search(r"\bitalic\b", normalized))
+    oblique = bool(re.search(r"\boblique\b", normalized))
+    if weight is None and width is None and not italic and not oblique:
+        return
+
+    bold = weight is not None and weight >= 700
+    regular = weight == 400 and not italic and not oblique
+
+    if "OS/2" in base:
+        os2 = base["OS/2"]
+        if weight is not None:
+            os2.usWeightClass = weight
+        if width is not None:
+            os2.usWidthClass = width
+        # only the bits the subfamily expresses; keep effect/TYPO/WWS bits
+        selection = os2.fsSelection & ~((1 << 0) | (1 << 5) | (1 << 6) | (1 << 9))
+        if italic or oblique:
+            selection |= 1 << 0
+        if oblique:
+            selection |= 1 << 9
+        if bold:
+            selection |= 1 << 5
+        if regular:
+            selection |= 1 << 6
+        os2.fsSelection = selection
+
+    if "head" in base:
+        head = base["head"]
+        # bold(0)/italic(1) always; Condensed(5)/Extended(6) only with a width
+        clear = (1 << 0) | (1 << 1)
+        if width is not None:
+            clear |= (1 << 5) | (1 << 6)
+        mac_style = head.macStyle & ~clear
+        if bold:
+            mac_style |= 1 << 0
+        if italic or oblique:
+            mac_style |= 1 << 1
+        if width is not None and width < 5:
+            mac_style |= 1 << 5
+        elif width is not None and width > 5:
+            mac_style |= 1 << 6
+        head.macStyle = mac_style
 
 
 def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem, reverse=False):
@@ -443,11 +515,6 @@ def _update_metrics(base, p, mono_ref_adv, report):
         os2 = base["OS/2"]
         os2.panose.bProportion = 9  # monospace
         os2.xAvgCharWidth = round(mono_ref_adv * p.mono_adv_mul)
-        # The style name is freely typed; reflect a recognized weight word or
-        # number in usWeightClass (leave the base's value when unrecognized).
-        weight = _weight_from_style(p.style)
-        if weight is not None:
-            os2.usWeightClass = weight
         # Recompute the coverage flags from the merged cmap: the mono base's
         # values no longer describe the appended CJK glyphs. fontTools helpers
         # (>= 4.44) keep the base's ranges and add the CJK ones.
@@ -557,6 +624,7 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     _merge_cmap(base, base_cmap, added_cmap, report)
     _synthesize_names(base, cjk, p)
     _update_metrics(base, p, mono_ref_adv, report)
+    _sync_subfamily_style(base, p.style)
     _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
     _ensure_gasp(base)
 
