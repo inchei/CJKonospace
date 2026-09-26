@@ -15,6 +15,8 @@ export interface Params {
   cjkBaselineOffset: number;
   /** lock CJK advance to 2 × mono advance */
   lock2to1: boolean;
+  /** line-height multiplier applied to the recomputed ascent/descent */
+  lineHeight: number;
   text: string;
 }
 
@@ -30,6 +32,7 @@ export const DEFAULT_PARAMS: Params = {
   cjkAdvMul: 1,
   cjkBaselineOffset: 0,
   lock2to1: true,
+  lineHeight: 1.3,
   text: "中文 abc 中文 ABC 中文 123 汉字\nCJK 与 monospace 1:2 对齐测试\n-> => == != ===",
 };
 

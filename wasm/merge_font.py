@@ -295,18 +295,31 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     tool_url = "https://github.com/inchei/CJKonospace"
     synth = f"Synthesized with CJKonospace ({tool_url})"
 
-    def original_notices(name_id):
-        """Synthesis statement first, then both input fonts' own name records."""
-        parts = [synth]
-        for label, font in (("mono", base), ("CJK", cjk)):
+    def original_texts(name_id):
+        """Name record texts from the input fonts having this record."""
+        out = []
+        for font in (base, cjk):
             text = font["name"].getDebugName(name_id) if "name" in font else None
             if text:
-                parts.append(f"Original {label}:\n{text}")
-        return "\n\n".join(parts)
+                out.append(text)
+        return out
+
+    def original_notices(name_id):
+        """Synthesis statement first, then both input fonts' own name records."""
+        return "\n\n".join([synth, *original_texts(name_id)])
 
     # read originals before overwriting; copyright keeps both source notices
     copyright_notice = original_notices(0)
     license_notice = original_notices(13)
+    # trademark/manufacturer/designer/description/URLs: keep both sides'
+    # attribution instead of silently dropping the CJK font's; skip IDs
+    # neither font provides (so no record is fabricated)
+    carried = [
+        (nid, original_notices(nid))
+        for nid in (7, 8, 9, 10, 11, 12, 14)
+        if original_texts(nid)
+    ]
+    managed = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 21, 22)
     for nid, val in (
         (0, copyright_notice),
         (1, fam),
@@ -315,11 +328,44 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         (4, full),
         (5, "Version 1.000"),
         (6, ps),
+        *carried,
         (13, license_notice),
-        (14, tool_url),
+        (16, fam),  # typographic family, kept in sync with ID 1
+        (17, style),  # typographic subfamily, kept in sync with ID 2
+        (21, fam),  # WWS family
+        (22, style),  # WWS subfamily
     ):
         nt.setName(val, nid, 3, 1, 0x409)
-        nt.setName(val, nid, 1, 0, 0)
+        try:
+            val.encode("mac_roman")
+        except UnicodeEncodeError:
+            # Mac Roman cannot represent this text (e.g. CJK names); drop
+            # any stale Mac record so it cannot contradict the Windows one
+            nt.names = [
+                rec
+                for rec in nt.names
+                if not (
+                    rec.nameID == nid
+                    and (rec.platformID, rec.platEncID, rec.langID) == (1, 0, 0)
+                )
+            ]
+        else:
+            nt.setName(val, nid, 1, 0, 0)
+    # drop records that are stale or meaningless in the merged output:
+    # reserved (15), Mac-only legacy names (18), the mono font's sample text
+    # (19) and CID findfont name (20, the output is never CID-keyed), color
+    # palettes (23, 24, no COLR table is carried over), and the variable-font
+    # PostScript prefix (25, the output is always a static instance)
+    drop_ids = {15, 18, 19, 20, 23, 24, 25}
+    nt.names = [
+        rec
+        for rec in nt.names
+        if rec.nameID not in drop_ids
+        and (
+            rec.nameID not in managed
+            or (rec.platformID, rec.platEncID, rec.langID) in ((3, 1, 0x409), (1, 0, 0))
+        )
+    ]
 
     # --- monospace metadata: terminals/editors rely on these flags ---
     report("metrics")

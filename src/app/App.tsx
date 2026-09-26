@@ -306,7 +306,12 @@ export default function App() {
     url?: string;
     fileName?: string;
     added?: number;
+    format?: string;
   }>({ status: "idle" });
+  // advanced generation options (also settable via CLI params.json)
+  const [advFamily, setAdvFamily] = useState("");
+  const [advStyle, setAdvStyle] = useState("Regular");
+  const [advFormat, setAdvFormat] = useState<"ttf" | "woff2">("ttf");
   const genUrlRef = useRef<string | null>(null);
   const genBytesRef = useRef<ArrayBuffer | null>(null);
   const [woff2, setWoff2] = useState<{ busy: boolean; error: string | null }>({
@@ -351,17 +356,26 @@ export default function App() {
 
   /** The exact object handed to merge_font.py (wasm and CLI share it). */
   function buildMergePayload() {
-    const sanitize = (s: string) => s.replace(/[\\/:*?"<>|\s]+/g, "");
-    const joined =
-      `${sanitize(cjk.font?.meta.familyName ?? "")}_${sanitize(mono.font?.meta.familyName ?? "")}`.replace(
-        /^_+|_+$/g,
-        "",
-      );
+    // spaces are legal in family names; only strip characters that are
+    // illegal in names/files, and join the two families with a space
+    const sanitize = (s: string) =>
+      s
+        .replace(/[\\/:*?"<>|]+/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const joined = [
+      sanitize(cjk.font?.meta.familyName ?? ""),
+      sanitize(mono.font?.meta.familyName ?? ""),
+    ]
+      .filter((s) => s !== "")
+      .join(" ");
     return {
       fs: params.fontSize,
       lock2to1: params.lock2to1,
-      familyName: joined || "CJKonospace",
-      styleName: "Regular",
+      lineHeight: params.lineHeight,
+      format: advFormat,
+      familyName: advFamily.trim() || joined || "CJKonospace",
+      styleName: advStyle.trim() || "Regular",
       mono: {
         advMul: params.monoAdvMul,
         gsx: params.monoGlyphScale,
@@ -420,7 +434,12 @@ export default function App() {
           })),
       );
       if (genUrlRef.current) URL.revokeObjectURL(genUrlRef.current);
-      const url = URL.createObjectURL(new Blob([data], { type: "font/ttf" }));
+      const format = payload.format === "woff2" ? "woff2" : "ttf";
+      const url = URL.createObjectURL(
+        new Blob([data], {
+          type: format === "woff2" ? "font/woff2" : "font/ttf",
+        }),
+      );
       genUrlRef.current = url;
       genBytesRef.current = data;
       setWoff2({ busy: false, error: null });
@@ -430,8 +449,9 @@ export default function App() {
       setGen({
         status: "done",
         url,
-        fileName: `${family}.ttf`,
+        fileName: `${family}.${format}`,
         added: meta.added,
+        format,
       });
     } catch (e) {
       setGen({
@@ -921,15 +941,19 @@ export default function App() {
                   >
                     {t("gen.download")}
                   </a>
-                  <Button
-                    className={WRAP_BTN}
-                    variant="neutral"
-                    size="sm"
-                    onClick={handleDownloadWoff2}
-                    disabled={woff2.busy}
-                  >
-                    {woff2.busy ? t("gen.compressing") : t("gen.downloadWoff2")}
-                  </Button>
+                  {gen.format !== "woff2" && (
+                    <Button
+                      className={WRAP_BTN}
+                      variant="neutral"
+                      size="sm"
+                      onClick={handleDownloadWoff2}
+                      disabled={woff2.busy}
+                    >
+                      {woff2.busy
+                        ? t("gen.compressing")
+                        : t("gen.downloadWoff2")}
+                    </Button>
+                  )}
                   {woff2.error && (
                     <p className="text-xs font-base break-all">
                       ✗ {woff2.error}
@@ -964,6 +988,85 @@ export default function App() {
                   {t("gen.cliHint")}
                 </p>
               </div>
+              <Accordion>
+                <AccordionItem value="advanced">
+                  <AccordionTrigger className="p-2 text-xs">
+                    {t("gen.advanced")}
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="flex flex-col gap-2">
+                      <label className="flex flex-col gap-1 text-xs font-base">
+                        <span className="font-heading">
+                          {t("gen.familyName")}
+                        </span>
+                        <Input
+                          value={advFamily}
+                          placeholder={
+                            cjk.font || mono.font
+                              ? buildMergePayload().familyName
+                              : "CJKonospace"
+                          }
+                          onChange={(e) => setAdvFamily(e.target.value)}
+                          aria-label={t("gen.familyName")}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-base">
+                        <span className="font-heading">
+                          {t("gen.styleName")}
+                        </span>
+                        <Input
+                          value={advStyle}
+                          onChange={(e) => setAdvStyle(e.target.value)}
+                          aria-label={t("gen.styleName")}
+                        />
+                      </label>
+                      <div>
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <Label className="text-xs">
+                            {t("gen.lineHeight")}
+                          </Label>
+                          <NumberField
+                            value={params.lineHeight}
+                            min={1}
+                            max={2}
+                            step={0.05}
+                            format={f2}
+                            ariaLabel={t("gen.lineHeight")}
+                            onCommit={(v) => setNum("lineHeight", v)}
+                          />
+                        </div>
+                        <Slider
+                          value={[params.lineHeight]}
+                          min={1}
+                          max={2}
+                          step={0.05}
+                          onValueChange={(v) => {
+                            const arr = Array.isArray(v) ? v : [v];
+                            setNum("lineHeight", arr[0] ?? params.lineHeight);
+                          }}
+                          className="pb-2"
+                        />
+                      </div>
+                      <label className="flex flex-col gap-1 text-xs font-base">
+                        <span className="font-heading">{t("gen.format")}</span>
+                        <select
+                          className="w-full min-w-0 rounded-base border-2 border-border bg-secondary-background px-2 py-1.5 text-xs font-base shadow-shadow"
+                          value={advFormat}
+                          onChange={(e) =>
+                            setAdvFormat(
+                              e.target.value === "woff2" ? "woff2" : "ttf",
+                            )
+                          }
+                          aria-label={t("gen.format")}
+                        >
+                          <option value="ttf">TTF</option>
+                          <option value="woff2">WOFF2</option>
+                        </select>
+                      </label>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </CardContent>
           </Card>
         </div>

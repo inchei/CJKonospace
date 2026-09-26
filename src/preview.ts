@@ -4,9 +4,6 @@ import type { Override, Params } from "./params";
 import type { ShapedGlyph } from "./shaper";
 import type { Slot } from "./types";
 
-/** Default line-height multiplier for the generated font (see wasm/merge_font.py). */
-const LINE_HEIGHT = 1.3;
-
 export interface RenderInput {
   cjkFont: LoadedFont | null;
   monoFont: LoadedFont | null;
@@ -247,7 +244,8 @@ export function renderPreview(
   );
   const hasInk = Number.isFinite(metricTop) && Number.isFinite(metricBot);
   const glyphH = hasInk ? metricTop - metricBot : 0;
-  const lineH = hasInk ? glyphH * LINE_HEIGHT : fs * 1.7;
+  // line-height multiplier shared with the merge (see wasm/merge_font.py)
+  const lineH = hasInk ? glyphH * params.lineHeight : fs * 1.7;
   const extra = hasInk ? lineH - glyphH : 0;
   const ascender = hasInk ? metricTop + extra * 0.6 : 0;
   const descender = hasInk ? metricBot - (extra - extra * 0.6) : 0;
