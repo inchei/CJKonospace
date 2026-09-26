@@ -1088,9 +1088,6 @@ export default function App() {
                           onChange={(e) => setAdvStyle(e.target.value)}
                           aria-label={t("gen.styleName")}
                         />
-                        <span className="opacity-70">
-                          {t("gen.styleNameHint")}
-                        </span>
                       </label>
                       <div>
                         <div className="mb-1 flex items-center justify-between gap-2">
