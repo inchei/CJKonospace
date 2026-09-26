@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FolderSearch } from "lucide-react";
 
 import "@/lib/i18n";
-import { loadFont, type LoadedFont } from "@/fontLoader";
+import { isMonospace, loadFont, type LoadedFont } from "@/fontLoader";
 import { isWoff2, toSfnt, toWoff2 } from "@/woff2";
 import { inspectTTC, isTTC, type TTCFace } from "@/ttc";
 import { DEFAULT_PARAMS, type Params } from "@/params";
@@ -319,6 +319,10 @@ export default function App() {
   const [advFamily, setAdvFamily] = useState("");
   const [advStyle, setAdvStyle] = useState("");
   const [advFormat, setAdvFormat] = useState<"ttf" | "woff2">("ttf");
+  const monoIsMonospace = useMemo(
+    () => (mono.font ? isMonospace(mono.font.font) : true),
+    [mono.font],
+  );
   const genUrlRef = useRef<string | null>(null);
   const genBytesRef = useRef<ArrayBuffer | null>(null);
   const [woff2, setWoff2] = useState<{ busy: boolean; error: string | null }>({
@@ -828,6 +832,9 @@ export default function App() {
                     : undefined
                 }
                 systemFontLabel={t("load.systemFont")}
+                warning={
+                  mono.font && !monoIsMonospace ? t("load.monoWarn") : undefined
+                }
                 presetLabel={t("load.preset")}
                 presetPlaceholder={t("load.presetPlaceholder")}
                 downloadingLabel={t("load.downloading")}
@@ -1184,6 +1191,7 @@ function FontSlotInfo({
   onPreset,
   onSystemFont,
   systemFontLabel,
+  warning,
 }: {
   label: string;
   color: string;
@@ -1215,6 +1223,7 @@ function FontSlotInfo({
   onPreset?: (p: MonoPreset) => void;
   onSystemFont?: () => void;
   systemFontLabel?: string;
+  warning?: string;
 }) {
   const font = slot.font;
   const meta = font?.meta;
@@ -1383,6 +1392,11 @@ function FontSlotInfo({
             ? `${meta.familyName} ${meta.styleName ? `· ${meta.styleName}` : ""} · ${meta.unitsPerEm}upm${meta.isVariable ? ` · ${vfNote}` : ""}`
             : emptyLabel}
       </div>
+      {warning && (
+        <div className="rounded-base border-2 border-border bg-[#ffd166] px-3 py-2 text-xs font-base break-words text-black">
+          {warning}
+        </div>
+      )}
       {variation && variation.axes.length > 0 && (
         <div className="flex flex-col gap-2 rounded-base border-2 border-border bg-secondary-background p-2">
           <Badge className="bg-main text-black whitespace-normal">

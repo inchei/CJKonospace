@@ -132,3 +132,20 @@ export function loadFont(
   };
   return { buffer: buffer2, font, meta, ttc, variation };
 }
+
+/**
+ * True when the font's printable-ASCII glyphs all share one advance width.
+ * CJK is full-width (2x) by design and is intentionally not considered; a font
+ * with no measurable ASCII glyph counts as not monospace.
+ */
+export function isMonospace(font: Font): boolean {
+  const widths = new Set<number>();
+  for (let cp = 0x20; cp <= 0x7e; cp++) {
+    const ch = String.fromCharCode(cp);
+    if (font.charToGlyphIndex(ch) === 0) continue;
+    const aw = font.charToGlyph(ch)?.advanceWidth ?? 0;
+    if (aw > 0) widths.add(aw);
+    if (widths.size > 1) return false;
+  }
+  return widths.size === 1;
+}

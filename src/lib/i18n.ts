@@ -28,6 +28,7 @@ const zhHant = {
     instance: "內建實例",
     vfWarning:
       "⚠ 可變字體在瀏覽器生成耗時較長，建議僅瀏覽或下載 build.py 本地生成",
+    monoWarn: "偵測到 mono 字體非等寬，生成字體將不再標記為等寬字體",
     systemFont: "從系統字型選擇",
     systemFontSearch: "搜尋字型…",
     systemFontEmpty: "找不到符合的字型",
@@ -145,6 +146,7 @@ void i18next
             instance: "内置实例",
             vfWarning:
               "⚠ 可变字体在浏览器生成耗时较长，建议仅浏览或下载 build.py 本地生成",
+            monoWarn: "检测到 mono 字体非等宽，生成字体将不再标记为等宽字体",
             systemFont: "从系统字体选择",
             systemFontSearch: "搜索字体…",
             systemFontEmpty: "找不到匹配的字体",
@@ -240,6 +242,8 @@ void i18next
             instance: "組み込みインスタンス",
             vfWarning:
               "⚠ 可変フォントはブラウザでの生成に時間がかかるため、プレビューのみの利用か build.py のダウンロードによるローカル生成を推奨します",
+            monoWarn:
+              "mono フォントが等幅ではないため、生成されるフォントは等幅としてマークされません",
             systemFont: "システムフォントから選択",
             systemFontSearch: "フォントを検索…",
             systemFontEmpty: "一致するフォントがありません",
@@ -339,6 +343,8 @@ void i18next
             instance: "내장 인스턴스",
             vfWarning:
               "⚠ 가변 폰트는 브라우저에서 생성에 시간이 오래 걸리므로, 미리보기로만 사용하거나 build.py를 다운로드하여 로컬에서 생성하시기 바랍니다",
+            monoWarn:
+              "mono 폰트가 고정폭이 아닙니다. 생성된 폰트는 더 이상 고정폭으로 표시되지 않습니다",
             systemFont: "시스템 폰트에서 선택",
             systemFontSearch: "폰트 검색…",
             systemFontEmpty: "일치하는 폰트가 없습니다",

@@ -513,14 +513,37 @@ def _synthesize_names(base, cjk, p):
     ]
 
 
+def _is_monospace(font, cmap):
+    """True when the font's printable-ASCII glyphs all share one advance.
+
+    Only ASCII is considered: CJK is full-width (2x) by design and would not be
+    uniform. A base with no measurable ASCII glyph is not monospace (nothing
+    verifies it).
+    """
+    hmtx = font["hmtx"]
+    widths = {
+        hmtx[g][0]
+        for cp, g in cmap.items()
+        if 0x20 <= cp <= 0x7E and g in hmtx.metrics and hmtx[g][0] > 0
+    }
+    return len(widths) == 1
+
+
 def _update_metrics(base, p, mono_ref_adv, report):
-    """Set monospace/coverage flags that depend on the final merged font."""
+    """Set monospace/coverage flags; returns whether the mono flags were applied.
+
+    The "font is monospace" flags (post.isFixedPitch, panose.bProportion) are
+    only set when the base actually is monospace, so a proportional base is not
+    mislabelled.
+    """
     report("metrics")
-    if "post" in base:
+    mono = _is_monospace(base, base.getBestCmap())
+    if "post" in base and mono:
         base["post"].isFixedPitch = 1
     if "OS/2" in base:
         os2 = base["OS/2"]
-        os2.panose.bProportion = 9  # monospace
+        if mono:
+            os2.panose.bProportion = 9  # monospace
         os2.xAvgCharWidth = round(mono_ref_adv * p.mono_adv_mul)
         # Recompute the coverage flags from the merged cmap: the mono base's
         # values no longer describe the appended CJK glyphs. fontTools helpers
@@ -528,6 +551,7 @@ def _update_metrics(base, p, mono_ref_adv, report):
         os2.recalcUnicodeRanges(base)
         os2.recalcCodePageRanges(base)
         os2.updateFirstAndLastCharIndex(base)
+    return mono
 
 
 def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
@@ -630,7 +654,7 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     )
     _merge_cmap(base, base_cmap, added_cmap, report)
     _synthesize_names(base, cjk, p)
-    _update_metrics(base, p, mono_ref_adv, report)
+    mono = _update_metrics(base, p, mono_ref_adv, report)
     _sync_subfamily_style(base, p.style)
     _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
     _ensure_gasp(base)
@@ -640,11 +664,24 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
         base.flavor = "woff2"  # brotli-compressed packaging of the same TTF
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
-    return {"added": added, "upem": upem, "format": p.fmt, "subset_kept": subset_kept}
+    return {
+        "added": added,
+        "upem": upem,
+        "format": p.fmt,
+        "subset_kept": subset_kept,
+        "mono": mono,
+    }
 
 
 if __name__ == "__main__":
     mono_path, cjk_path, out_path, params_path = sys.argv[1:5]
     with open(params_path) as fp:
         params = json.load(fp)
-    print(json.dumps(merge(mono_path, cjk_path, out_path, params)))
+    meta = merge(mono_path, cjk_path, out_path, params)
+    if not meta["mono"]:
+        print(
+            "warning: mono base is not monospace; the output will not be "
+            "flagged as monospace",
+            file=sys.stderr,
+        )
+    print(json.dumps(meta))
