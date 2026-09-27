@@ -8,6 +8,12 @@ Mono is the base font so its GSUB/GPOS/GDEF and glyph IDs stay intact; scaled
 CJK glyphs are appended at the end of the glyph order and exposed through cmap.
 fontTools only, no numpy -- runs inside pyodide (see src/exporter.ts).
 
+Pass "mergeWght": true in params to merge the shared wght axis instead of
+pinning both fonts to a static instance: both inputs must be variable
+glyf/gvar fonts with a wght axis, and the output is a variable font over the
+mono wght range. "weightMap" ([[mono, cjk], ...] anchors, mono user values)
+pairs the two fonts' masters; without it the fvar min/default/max are aligned.
+
 Kept deliberately as one self-contained module: src/lib/mergeScript.ts slices
 it above the __main__ guard to emit a standalone build.py, and the pyodide
 worker writes/imports it as a single file. Steps are separated into helpers
@@ -21,6 +27,7 @@ import copy
 import json
 import re
 import sys
+from math import ceil
 from types import SimpleNamespace
 
 from fontTools.misc.roundTools import otRound
@@ -146,8 +153,11 @@ def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem, reverse=False):
 
     reverse=True flips contour direction, which is needed for CFF (PostScript)
     sources: CFF is counter-clockwise, TrueType conventionally clockwise.
+    The real glyph set (not None) is required: composite sources keep their
+    components, which _finalize_composites rebases onto the merged names
+    (a None set crashes on the first component).
     """
-    pen = TTGlyphPen(None)
+    pen = TTGlyphPen(src_glyph_set)
     cu2qu = Cu2QuPen(pen, max_err=upem * 0.001, reverse_direction=reverse)
     tpen = TransformPen(cu2qu, Transform(sx, 0, 0, sy, dx, dy))
     src_glyph_set[name].draw(tpen)
@@ -208,19 +218,26 @@ def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
     """
     g = src_glyf[name]
     g.expand(src_glyf)
+    if g.isComposite():
+        if sx != sy:
+            # a non-uniform scale cannot preserve the component structure
+            return None
+        if sx != 1 and not all(hasattr(comp, "x") for comp in g.components):
+            # anchor-attached components carry point numbers, not offsets.
+            # (decompiled components never carry ARGS_ARE_XY_VALUES in flags;
+            # presence of x/y is the real discriminator.)
+            return None
+        # Structure is preserved but transforms are applied later by
+        # _finalize_composites: the component bases are appended with their
+        # own transforms, so the composite must be rebased onto the renamed
+        # bases (see the formula there) instead of transformed here.
+        new = copy.deepcopy(g)
+        new.recalcBounds(src_glyf)
+        return new
     if not hasattr(g, "coordinates"):
         empty = Glyph()  # empty glyph (no contours)
         empty.numberOfContours = 0
         return empty
-    if g.isComposite():
-        if sx == 1 and sy == 1:
-            new = copy.deepcopy(g)
-            for comp in new.components:
-                comp.x += dx
-                comp.y += dy
-            new.recalcBounds(src_glyf)
-            return new
-        return None
     new = Glyph()
     new.numberOfContours = g.numberOfContours
     new.endPtsOfContours = list(g.endPtsOfContours)
@@ -259,6 +276,13 @@ def _read_params(params):
         cjk_bl=float(cp.get("baseline", 0)),
         subset_unicodes=(cp.get("subset") or {}).get("unicodes") or [],
         variations=params.get("variations") or {},
+        merge_wght=bool(params.get("mergeWght", False)),
+        # [[mono, cjk], ...] wght anchors (user values) pairing the two fonts;
+        # only read when merge_wght is on
+        weight_map=params.get("weightMap") or [],
+        # {"min": ..., "max": ...} output wght range override (user values);
+        # defaults to the full mono range when absent or invalid
+        axis_range=params.get("axisRange") or {},
         family=params.get("familyName", "CJKonospace"),
         # empty means "unset": follow the mono base's own subfamily
         style=str(params.get("styleName") or "").strip(),
@@ -287,10 +311,21 @@ def _subset_cjk(cjk, p, report):
     return len(cjk.getGlyphOrder())
 
 
+def _default_location(font):
+    """Axis defaults of a variable font (tag -> user value)."""
+    fvar = font.get("fvar")
+    if fvar is None:
+        return {}
+    return {axis.axisTag: axis.defaultValue for axis in fvar.axes}
+
+
 def _instance_variable_fonts(base, cjk, p, report):
     """Pin variable fonts to a static instance (no axis merging).
 
-    An empty location means "use the axis defaults".
+    An empty location means "use the axis defaults". Axes missing from the
+    location are pinned at their defaults too: leaving any axis variable
+    would carry fvar/gvar/HVAR into the static pipeline, which cannot
+    rebase them for appended glyphs (stale HVAR maps crash the save).
     """
     if "fvar" not in base and "fvar" not in cjk:
         return
@@ -299,7 +334,9 @@ def _instance_variable_fonts(base, cjk, p, report):
     report("instance")
     for tag, font in (("mono", base), ("cjk", cjk)):
         if "fvar" in font:
-            instantiateVariableFont(font, p.variations.get(tag) or {}, inplace=True)
+            loc = _default_location(font)
+            loc.update(p.variations.get(tag) or {})
+            instantiateVariableFont(font, loc, inplace=True)
 
 
 def _mono_reference_advance(base, base_cmap, upem):
@@ -331,6 +368,88 @@ def _adjust_mono_advances(base, p, upem, units_per_px, report):
         hmtx[name] = (new_adv, lsb)
 
 
+def _finalize_composites(
+    base, p, units_per_px, src_to_out, dx_map, tmap, appended, cjk_names
+):
+    """Rebase preserved CJK composites onto the merged glyph names.
+
+    Appended base glyphs already carry the merge transform, so a preserved
+    composite keeps its original component transform and only gets a
+    corrective offset. With uniform scale S, composite shift d and base
+    shift d_base, rendering M_new*(S*B + d_base) + o_new must equal the
+    directly transformed outlines S*(M_old*B + o_old) + d, i.e. M_new = M_old
+    and o_new = S*o_old + d - M_old*d_base. Components drawn by the pen
+    already carry the composite transform; for those the scale is stripped
+    back out first. Either way the result renders exactly the transformed
+    outlines while keeping the component structure (and cross-master point
+    compatibility).
+
+    Returns the codepoints to drop: composites whose references cannot be
+    rebased exactly (unencoded bases, or mono bases whose outlines were
+    redrawn) are left out so the cmap falls through instead of writing a
+    broken composite.
+    """
+    glyf = base["glyf"]
+    hmtx = base["hmtx"]
+    mono_redrawn = not (p.mono_gsx == 1 and p.mono_gsy == 1 and p.mono_bl == 0)
+    dy_const = -p.cjk_bl * units_per_px
+    base_order = set(base.getGlyphOrder())
+    dropped = {}
+    for gname, cpnt in appended:
+        g = glyf[gname]
+        g.expand(glyf)
+        if not g.isComposite():
+            continue
+        sx, sy, dx, dy, from_pen = tmap[gname]
+        ok = True
+        for comp in g.components:
+            out_base = src_to_out.get(comp.glyphName)
+            if out_base is None or out_base not in base_order:
+                ok = False
+                break
+            if comp.glyphName in dx_map and out_base in cjk_names:
+                dbx, dby = dx_map[comp.glyphName], dy_const
+            elif mono_redrawn:
+                ok = False
+                break
+            else:
+                # untouched mono-base glyph: outlines carry no merge shift
+                dbx, dby = 0, 0
+            raw = comp.transform if hasattr(comp, "transform") else [[1, 0], [0, 1]]
+            if from_pen:
+                # components already carry the composite transform (offsets
+                # included): strip the scale back out, no extra shift
+                if sx == 0 or sy == 0:
+                    ok = False
+                    break
+                mxx, mxy, myx, myy = (
+                    raw[0][0] / sx,
+                    raw[0][1] / sx,
+                    raw[1][0] / sy,
+                    raw[1][1] / sy,
+                )
+                comp.transform = [[mxx, mxy], [myx, myy]]
+                ox, oy, ex, ey = comp.x, comp.y, 0, 0
+            else:
+                mxx, mxy, myx, myy = raw[0][0], raw[0][1], raw[1][0], raw[1][1]
+                ox, oy, ex, ey = sx * comp.x, sy * comp.y, dx, dy
+            comp.glyphName = out_base
+            comp.x = otRound(ox + ex - (mxx * dbx + mxy * dby))
+            comp.y = otRound(oy + ey - (myx * dbx + myy * dby))
+        if not ok:
+            dropped[gname] = cpnt
+            continue
+        g.recalcBounds(glyf)
+        hmtx[gname] = (hmtx[gname][0], getattr(g, "xMin", 0))
+    for gname in dropped:
+        # leave an empty glyph behind (unmapped) so the cmap falls through
+        # to the mono base instead of referencing a broken composite
+        empty = Glyph()
+        empty.numberOfContours = 0
+        glyf[gname] = empty
+    return list(dropped.values())
+
+
 def _append_cjk(
     base,
     cjk,
@@ -350,6 +469,14 @@ def _append_cjk(
     """
     report("cjk", 0)
     existing = set(base.getGlyphOrder())
+    # CJK glyph name -> merged glyph name, for rebasing preserved composites:
+    # a component may reference a glyph appended later in cmap order (or one
+    # the base already covers), so the map is built up front. Appended names
+    # are unique per codepoint, hence only the initial base order matters.
+    src_to_out = {
+        cname: base_cmap.get(cpnt, f"cjk.{cpnt:04X}")
+        for cpnt, cname in cjk_cmap.items()
+    }
     glyf = base["glyf"]
     hmtx = base["hmtx"]
     glyphs = cjk.getGlyphSet()
@@ -359,6 +486,15 @@ def _append_cjk(
     vmtx = base.get("vmtx")
     added = 0
     added_cmap = {}
+    # per-glyph merge transform, for the composite post-pass and its
+    # exactness formula: dx varies per glyph (advance centering)
+    dx_map = {}
+    # preserved composites: (sx, sy, dx, dy, from_pen) per merged name
+    tmap = {}
+    appended = []
+    # every CJK-appended glyph name (simple or composite): component bases
+    # resolving here were transformed with a tracked dx
+    cjk_names = set()
     total = sum(1 for c in cjk_cmap if c not in base_cmap)
     for cpnt, cname in cjk_cmap.items():
         if cpnt in base_cmap:
@@ -376,11 +512,14 @@ def _append_cjk(
         dy = -p.cjk_bl * units_per_px
         sx = cjk_scale * p.cjk_gsx
         sy = cjk_scale * p.cjk_gsy
+        dx_map[cname] = dx
         g = None
+        from_pen = False
         if cjk_glyf is not None:
             g = _move_glyf_glyph(cjk_glyf, cname, sx, sy, dx, dy)
         if g is None:
             g = _pen_glyph(glyphs, cname, sx, sy, dx, dy, upem, cjk_is_cff)
+            from_pen = True
         # glyf.__setitem__ appends to glyphOrder itself (O(1) via its reverse map);
         # appending again here would force a rebuild every iteration (O(n^2)).
         glyf[gname] = g
@@ -391,10 +530,20 @@ def _append_cjk(
                 v_adv = round(cjk_vmtx[cname][0] * cjk_scale)
             vmtx[gname] = (v_adv, 0)
         existing.add(gname)
+        cjk_names.add(gname)
         added_cmap[cpnt] = gname
         added += 1
+        if g.isComposite():
+            appended.append((gname, cpnt))
+            tmap[gname] = (sx, sy, dx, dy, from_pen)
         if total and added % 2000 == 0:
             report("cjk", min(99, int(added * 100 / total)))
+    dropped = _finalize_composites(
+        base, p, units_per_px, src_to_out, dx_map, tmap, appended, cjk_names
+    )
+    for cpnt in dropped:
+        del added_cmap[cpnt]
+        added -= 1
     report("cjk", 100)
     return added, added_cmap
 
@@ -501,7 +650,7 @@ def _synthesize_names(base, cjk, p):
     # reserved (15), Mac-only legacy names (18), the mono font's sample text
     # (19) and CID findfont name (20, the output is never CID-keyed), color
     # palettes (23, 24, no COLR table is carried over), and the variable-font
-    # PostScript prefix (25, the output is always a static instance)
+    # PostScript prefix (25, inherited prefixes name the wrong family)
     drop_ids = {15, 18, 19, 20, 23, 24, 25}
     nt.names = [
         rec
@@ -512,6 +661,9 @@ def _synthesize_names(base, cjk, p):
             or (rec.platformID, rec.platEncID, rec.langID) in ((3, 1, 0x409), (1, 0, 0))
         )
     ]
+    if "head" in base:
+        # name ID 5 above is always "Version 1.000"; keep head in sync
+        base["head"].fontRevision = 1.0
 
 
 def _is_monospace(font, cmap):
@@ -555,6 +707,80 @@ def _update_metrics(base, p, mono_ref_adv, report):
     return mono
 
 
+def _scan_glyf(glyf):
+    """Outline bounds and maxp profile over the whole glyph set.
+
+    Returns ((yMin, yMax), profile) with profile holding maxima for
+    maxPoints/maxContours/maxCompositePoints/maxCompositeContours/
+    maxComponentElements/maxComponentDepth; (None, None) bounds when every
+    glyph is empty. Composites resolve through recalculated bounds and
+    recurse with a cycle guard; shared bases count per use (conservative).
+    """
+    bot = top = None
+    profile = {
+        "maxPoints": 0,
+        "maxContours": 0,
+        "maxCompositePoints": 0,
+        "maxCompositeContours": 0,
+        "maxComponentElements": 0,
+        "maxComponentDepth": 0,
+    }
+
+    def bounds(name):
+        """(lo, hi) outline extent of one glyph, composites included."""
+        g = glyf[name]
+        g.expand(glyf)
+        if hasattr(g, "coordinates") and len(g.coordinates):
+            ys = [y for _, y in g.coordinates]
+            return min(ys), max(ys)
+        if all(hasattr(g, attr) for attr in ("yMin", "yMax")):
+            return g.yMin, g.yMax
+        return None
+
+    def walk(name, seen):
+        """(points, contours, elements, depth), nested-composite aware."""
+        if name in seen or name not in glyf.glyphs:
+            return 0, 0, 0, 0
+        g = glyf[name]
+        g.expand(glyf)
+        if not g.isComposite():
+            if not hasattr(g, "coordinates"):
+                return 0, 0, 0, 0
+            return len(g.coordinates), g.numberOfContours, 0, 0
+        points = contours = elements = depth = 0
+        for comp in g.components:
+            p, c, _, d = walk(comp.glyphName, seen | {name})
+            points += p
+            contours += c
+            elements += 1
+            depth = max(depth, d + 1)
+        return points, contours, elements, depth
+
+    for name in glyf.glyphOrder:
+        extent = bounds(name)
+        if extent is not None:
+            lo, hi = extent
+            bot = lo if bot is None else min(bot, lo)
+            top = hi if top is None else max(top, hi)
+        g = glyf[name]
+        g.expand(glyf)
+        if not g.isComposite():
+            continue
+        points, contours, elements, depth = walk(name, set())
+        profile["maxCompositePoints"] = max(profile["maxCompositePoints"], points)
+        profile["maxCompositeContours"] = max(profile["maxCompositeContours"], contours)
+        profile["maxComponentElements"] = max(profile["maxComponentElements"], elements)
+        profile["maxComponentDepth"] = max(profile["maxComponentDepth"], depth)
+    for name in glyf.glyphOrder:
+        g = glyf[name]
+        g.expand(glyf)
+        if g.isComposite() or not hasattr(g, "coordinates"):
+            continue
+        profile["maxPoints"] = max(profile["maxPoints"], len(g.coordinates))
+        profile["maxContours"] = max(profile["maxContours"], g.numberOfContours)
+    return (bot, top), profile
+
+
 def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
     """Derive asc/desc from both fonts' hhea, times lineHeight.
 
@@ -564,9 +790,14 @@ def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
     See:
     - https://github.com/arrowtype/vertical-metrics
     - https://github.com/githubnext/monaspace/pull/227
+
+    Returns the actual outline (yMin, yMax) for win-metrics coverage (below).
     """
     multiplier = p.line_height
-    bl_units = p.cjk_bl * units_per_px
+    # same sign as the outline shift in _append_cjk (dy = -bl * units):
+    # a positive baseline offset moves glyphs down, so declared metrics
+    # must move down too (the preview applies the offset in the same direction)
+    bl_units = -p.cjk_bl * units_per_px
     if "hhea" in cjk:
         cjk_asc = cjk["hhea"].ascent * cjk_scale + bl_units
         cjk_desc = cjk["hhea"].descent * cjk_scale + bl_units
@@ -592,6 +823,28 @@ def _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px):
         os2.sTypoLineGap = 0
         os2.usWinAscent = ascender
         os2.usWinDescent = -descender
+        # win metrics are clipping guards, not design metrics: cover the
+        # actual outlines. Declared hhea can understate deep/tall glyphs
+        # (e.g. a base Arabic tail), and our own scaling/baseline shifts
+        # move bounds around. Windows clips anything outside these.
+        # maxp profile maxima are recomputed for the same reason:
+        # appended glyphs can exceed the mono base's maxima, and strict
+        # rasterizers size buffers from them.
+        if "glyf" in base:
+            (ymin, ymax), profile = _scan_glyf(base["glyf"])
+            if ymax is not None:
+                os2.usWinAscent = max(ascender, ceil(ymax))
+            if ymin is not None:
+                os2.usWinDescent = max(-descender, ceil(-ymin))
+            if "maxp" in base and base["maxp"].tableVersion == 0x00010000:
+                maxp = base["maxp"]
+                for attr, value in profile.items():
+                    setattr(maxp, attr, max(getattr(maxp, attr), value))
+        else:
+            ymin = ymax = None
+    else:
+        ymin = ymax = None
+    return ymin, ymax
 
 
 def _ensure_gasp(base):
@@ -617,11 +870,614 @@ def _ensure_gasp(base):
     base["gasp"] = gasp
 
 
-def merge(mono_path, cjk_path, out_path, params, progress=None):
-    def report(stage, value=None):
-        if progress:
-            progress(stage, value)
+# One full CJK merge per wght master; beyond this the browser worker runs
+# out of steam (use the standalone build.py locally for huge master counts).
+_MAX_VARIABLE_MASTERS = 16
 
+# meta["warnings"] codes (the web UI maps them to localized messages; the CLI
+# maps them to English in _VARIABLE_WARNING_TEXTS).
+_WARN_NO_WGHT_AXIS = "no-wght-axis"
+_WARN_CFF_VARIABLE = "cff-variable"
+_WARN_MONO_OUTLINE_IGNORED = "mono-outline-ignored"
+
+_VARIABLE_WARNING_TEXTS = {
+    _WARN_NO_WGHT_AXIS: (
+        "mergeWght requested but a side has no wght axis; static output"
+    ),
+    _WARN_CFF_VARIABLE: (
+        "mergeWght requested but a variable input uses CFF outlines; static output"
+    ),
+    _WARN_MONO_OUTLINE_IGNORED: (
+        "mergeWght ignores mono gsx/gsy/baseline (they break master "
+        "compatibility); advances still vary"
+    ),
+}
+
+
+def _fvar_axis(font, tag):
+    """(min, default, max) user values of an fvar axis, or None."""
+    fvar = font.get("fvar")
+    if fvar is None:
+        return None
+    for axis in fvar.axes:
+        if axis.axisTag == tag:
+            return (axis.minValue, axis.defaultValue, axis.maxValue)
+    return None
+
+
+def _fvar_axis_index(font, tag):
+    """Index of an fvar axis (the VarStore region axis order), or None."""
+    fvar = font.get("fvar")
+    if fvar is None:
+        return None
+    for i, axis in enumerate(fvar.axes):
+        if axis.axisTag == tag:
+            return i
+    return None
+
+
+def _instance_name(name_table, subfamily_id):
+    """English subfamily name of an fvar instance, or ""."""
+    if name_table is None:
+        return ""
+    rec = name_table.getName(subfamily_id, 3, 1, 0x409)
+    if rec is None:
+        rec = name_table.getName(subfamily_id, 1, 0, 0)
+    if rec is None:
+        for candidate in name_table.names:
+            if candidate.nameID == subfamily_id:
+                rec = candidate
+                break
+    if rec is None:
+        return ""
+    try:
+        return rec.toUnicode().strip()
+    except (UnicodeDecodeError, ValueError):
+        return ""
+
+
+def _mono_instances(base, out_min, out_max):
+    """[(wght_user, subfamily_name)] from the mono base's fvar instances.
+
+    Only instances expressible on the single-axis output survive: every
+    non-wght axis must sit at its default, and wght must fall inside the
+    (possibly narrowed) output range.
+    """
+    fvar = base.get("fvar")
+    if fvar is None:
+        return []
+    name_table = base.get("name")
+    found = []
+    for inst in fvar.instances:
+        coords = dict(inst.coordinates or {})
+        wght = None
+        representable = True
+        for axis in fvar.axes:
+            value = coords.get(axis.axisTag, axis.defaultValue)
+            if axis.axisTag == "wght":
+                wght = value
+            elif value != axis.defaultValue:
+                representable = False
+                break
+        if not representable or wght is None:
+            continue
+        if not (out_min - 1e-6 <= wght <= out_max + 1e-6):
+            continue
+        name = _instance_name(name_table, inst.subfamilyNameID)
+        if name:
+            found.append((wght, name))
+    return sorted(found)
+
+
+def _design_to_user_table(font, tag):
+    """[(design_n, user_value)] covering [-1, 1] for an fvar axis.
+
+    Folds the font's avar segment map (avar segments are
+    normalized-user -> normalized-design); without avar this is the inverse
+    of the plain fvar normalization. avar v2 (VarStore) is vanishingly rare
+    for wght and treated as identity.
+    """
+    axis = _fvar_axis(font, tag)
+    lo, de, hi = axis
+    points = [(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)]
+    avar = font.get("avar")
+    segments = getattr(avar, "segments", None) if avar is not None else None
+    if segments:
+        points += [(float(t), float(n)) for t, n in segments.get(tag, {}).items()]
+    table = []
+    for t, n in sorted(set(points), key=lambda p: (p[1], p[0])):
+        user = de + t * (de - lo) if t <= 0 else de + t * (hi - de)
+        table.append((n, user))
+    return table
+
+
+def _design_to_user(table, n):
+    """Piecewise-linear lookup in a _design_to_user_table."""
+    if n <= table[0][0]:
+        return table[0][1]
+    if n >= table[-1][0]:
+        return table[-1][1]
+    for (n0, u0), (n1, u1) in zip(table, table[1:], strict=False):
+        if n0 <= n <= n1:
+            span = n1 - n0
+            t = 0 if span == 0 else (n - n0) / span
+            return u0 + t * (u1 - u0)
+    return table[-1][1]
+
+
+def _user_to_design(font, tag, user):
+    """User-space axis value -> design-normalized coordinate (folds avar)."""
+    axis = _fvar_axis(font, tag)
+    if axis is None:
+        return 0.0
+    lo, de, hi = axis
+    if user <= de:
+        t = 0.0 if de == lo else -((de - user) / (de - lo))
+    else:
+        t = 0.0 if hi == de else (user - de) / (hi - de)
+    avar = font.get("avar")
+    segments = getattr(avar, "segments", None) if avar is not None else None
+    points = [(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)]
+    if segments:
+        points += [(float(k), float(v)) for k, v in segments.get(tag, {}).items()]
+    points = sorted(set(points))
+    if t <= points[0][0]:
+        return points[0][1]
+    if t >= points[-1][0]:
+        return points[-1][1]
+    for (t0, n0), (t1, n1) in zip(points, points[1:], strict=False):
+        if t0 <= t <= t1:
+            span = t1 - t0
+            u = 0 if span == 0 else (t - t0) / span
+            return n0 + u * (n1 - n0)
+    return points[-1][1]
+
+
+def _normalize_linear(value, triple):
+    """User-space value -> normalized coordinate on a linear (avar-less) axis."""
+    lo, de, hi = triple
+    if value <= de:
+        return 0.0 if de == lo else -((de - value) / (de - lo))
+    return 0.0 if hi == de else (value - de) / (hi - de)
+
+
+def _condition_range(cond):
+    """(axis_index, min, max) of a Format-1 FeatureVariations condition."""
+    if getattr(cond, "Format", 1) != 1:
+        return None
+    axis = getattr(cond, "AxisIndex", None)
+    lo = getattr(cond, "FilterRangeMinValue", None)
+    if lo is None:
+        lo = getattr(cond, "ConditionMinValue", None)
+    hi = getattr(cond, "FilterRangeMaxValue", None)
+    if hi is None:
+        hi = getattr(cond, "ConditionMaxValue", None)
+    if axis is None or lo is None or hi is None:
+        return None
+    return axis, float(lo), float(hi)
+
+
+def _layout_rules(base, p, out_triple):
+    """GSUB FeatureVariations rebuild plan: {featureTag: [(region, subs)]}.
+
+    Variable fonts swap glyphs by design region (e.g. Cascadia Code's rvrn
+    rule using dollar.BRACKET.600 at heavy weights), but instancing bakes
+    the matching rules into each static master and drops the table, so the
+    merged output would lose every such swap. Re-express the mono base's
+    wght-conditioned SingleSubst rules on the output's linear wght axis
+    (regions in output-normalized coordinates, user-space switch points
+    preserved); the builder recreates them with fresh lookups.
+    """
+    table = base.get("GSUB")
+    store = getattr(getattr(table, "table", None), "FeatureVariations", None)
+    if store is None:
+        return {}
+    fvar = base.get("fvar")
+    if fvar is None:
+        return {}
+    axis_tags = [axis.axisTag for axis in fvar.axes]
+    pinned = _default_location(base)
+    pinned.update(p.variations.get("mono") or {})
+    features = table.table.FeatureList.FeatureRecord
+    lookups = table.table.LookupList.Lookup
+    to_user = _design_to_user_table(base, "wght")
+    rules = {}
+    for record in store.FeatureVariationRecord or []:
+        ranges = []
+        usable = True
+        for cond in getattr(record.ConditionSet, "ConditionTable", None) or []:
+            parsed = _condition_range(cond)
+            if parsed is None:
+                usable = False
+                break
+            axis_index, cmin, cmax = parsed
+            if axis_index >= len(axis_tags):
+                usable = False
+                break
+            tag = axis_tags[axis_index]
+            if tag != "wght":
+                # other axes are pinned in the output: keep the record only
+                # when the pinned value satisfies the condition
+                axis = _fvar_axis(base, tag)
+                user = pinned.get(tag, axis[1] if axis else 0)
+                design = _user_to_design(base, tag, user)
+                if not (cmin - 1e-6 <= design <= cmax + 1e-6):
+                    usable = False
+                    break
+                continue
+            ranges.append((cmin, cmax))
+        if not usable or not ranges:
+            # no wght condition: uniformly baked-or-dropped across masters
+            # already, nothing to rebuild
+            continue
+        nmin = max(r[0] for r in ranges)
+        nmax = min(r[1] for r in ranges)
+        subs = {}
+        for subst in (
+            getattr(record.FeatureTableSubstitution, "SubstitutionRecord", None) or []
+        ):
+            feature_index = getattr(subst, "FeatureIndex", None)
+            feature = getattr(subst, "Feature", None)
+            if feature_index is None or feature is None:
+                continue
+            if not (0 <= feature_index < len(features)):
+                continue
+            feature_tag = features[feature_index].FeatureTag
+            for lookup_index in feature.LookupListIndex or []:
+                if not (0 <= lookup_index < len(lookups)):
+                    continue
+                lookup = lookups[lookup_index]
+                if lookup.LookupType != 1:  # SingleSubst only
+                    continue
+                for subtable in lookup.SubTable:
+                    mapping = getattr(subtable, "mapping", None) or {}
+                    for orig, repl in mapping.items():
+                        if isinstance(orig, str) and isinstance(repl, str):
+                            subs.setdefault((feature_tag, orig), repl)
+        by_feature = {}
+        for (feature_tag, orig), repl in subs.items():
+            by_feature.setdefault(feature_tag, {})[orig] = repl
+        for feature_tag, mapping in by_feature.items():
+            # design endpoints -> mono user -> output-normalized, clamped
+            omin = max(
+                -1.0,
+                _normalize_linear(_design_to_user(to_user, nmin), out_triple),
+            )
+            omax = min(
+                1.0, _normalize_linear(_design_to_user(to_user, nmax), out_triple)
+            )
+            if omax - omin < 1e-6:
+                continue
+            rules.setdefault(feature_tag, []).append(
+                ([{"wght": (omin, omax)}], mapping)
+            )
+    return rules
+
+
+def _wght_peaks(font):
+    """Unique design-normalized wght master positions; always includes 0."""
+    peaks = {0.0}
+    gvar = font.get("gvar")
+    if gvar is not None:
+        for variations in gvar.variations.values():
+            for var in variations:
+                region = (var.axes or {}).get("wght")
+                if region is not None:
+                    peaks.add(round(float(region[1]), 4))
+    index = _fvar_axis_index(font, "wght")
+    if index is not None:
+        for tag in ("HVAR", "MVAR"):
+            table = font.get(tag)
+            store = getattr(getattr(table, "table", None), "VarStore", None)
+            regions = getattr(getattr(store, "VarRegionList", None), "Region", None)
+            for region in regions or []:
+                axes = getattr(region, "VarRegionAxis", [])
+                if index >= len(axes):
+                    continue
+                # field is PeakCoord since forever; accept Peak just in case
+                peak = getattr(axes[index], "PeakCoord", None)
+                if peak is None:
+                    peak = getattr(axes[index], "Peak", None)
+                if peak is not None:
+                    peaks.add(round(float(peak), 4))
+    avar = font.get("avar")
+    segments = getattr(avar, "segments", None) if avar is not None else None
+    if segments:
+        for value in segments.get("wght", {}).values():
+            peaks.add(round(float(value), 4))
+    return sorted(peaks)
+
+
+def _clean_weight_map(raw):
+    """Validated [[mono, cjk]] anchors, or None when unusable."""
+    pairs = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            try:
+                pairs.append([float(item[0]), float(item[1])])
+            except (TypeError, IndexError, ValueError):
+                continue
+    return pairs if len(pairs) >= 2 else None
+
+
+def _apply_weight_map(anchors, mono_value):
+    """Piecewise-linear mono -> CJK through [mono, cjk] anchors (mirrors UI)."""
+    pts = sorted(anchors, key=lambda a: a[0])
+    if mono_value <= pts[0][0]:
+        return pts[0][1]
+    if mono_value >= pts[-1][0]:
+        return pts[-1][1]
+    for (m0, c0), (m1, c1) in zip(pts, pts[1:], strict=False):
+        if m0 <= mono_value <= m1:
+            span = m1 - m0
+            t = 0 if span == 0 else (mono_value - m0) / span
+            return c0 + t * (c1 - c0)
+    return pts[-1][1]
+
+
+def _invert_weight_map(anchors, cjk_value):
+    """Mono value whose mapped CJK value equals cjk_value."""
+    pts = sorted(anchors, key=lambda a: a[1])
+    if cjk_value <= pts[0][1]:
+        return pts[0][0]
+    if cjk_value >= pts[-1][1]:
+        return pts[-1][0]
+    for (m0, c0), (m1, c1) in zip(pts, pts[1:], strict=False):
+        if (c0 <= cjk_value <= c1) or (c1 <= cjk_value <= c0):
+            span = c1 - c0
+            t = 0 if span == 0 else (cjk_value - c0) / span
+            return m0 + t * (m1 - m0)
+    return pts[-1][0]
+
+
+def _variable_plan(base, cjk, p):
+    """Plan a wght merge: (plan, warnings), plan None on static fallback.
+
+    plan = {"axis": (min, default, max) mono user values, "locations":
+    [(mono_user, cjk_user), ...] sorted by mono}. Both fonts are instanced
+    at their own user values for every master; the CJK values come from the
+    weight-map anchors so uneven ranges/speeds stay aligned.
+    """
+    for font in (base, cjk):
+        if "fvar" not in font or _fvar_axis(font, "wght") is None:
+            return None, [_WARN_NO_WGHT_AXIS]
+        if "CFF " in font or "CFF2" in font:
+            return None, [_WARN_CFF_VARIABLE]
+    mono_axis = _fvar_axis(base, "wght")
+    cjk_axis = _fvar_axis(cjk, "wght")
+    if mono_axis[0] >= mono_axis[2]:
+        return None, [_WARN_NO_WGHT_AXIS]
+    anchors = _clean_weight_map(p.weight_map) or [
+        [mono_axis[0], cjk_axis[0]],
+        [mono_axis[1], cjk_axis[1]],
+        [mono_axis[2], cjk_axis[2]],
+    ]
+    to_mono = _design_to_user_table(base, "wght")
+    to_cjk = _design_to_user_table(cjk, "wght")
+    values = set()
+    for n in _wght_peaks(base):
+        values.add(round(_design_to_user(to_mono, n), 3))
+    for n in _wght_peaks(cjk):
+        values.add(round(_invert_weight_map(anchors, _design_to_user(to_cjk, n)), 3))
+    lo, de, hi = mono_axis
+    # narrowed output range (e.g. drop mono's thin end when the CJK minimum
+    # looks heavier); invalid overrides fall back to the full mono range
+    axis_range = p.axis_range or {}
+    try:
+        out_min = float(axis_range.get("min", lo))
+        out_max = float(axis_range.get("max", hi))
+    except (TypeError, ValueError):
+        out_min, out_max = lo, hi
+    if not (lo <= out_min < de < out_max <= hi):
+        out_min, out_max = lo, hi
+    values = sorted(v for v in values if out_min - 1e-6 <= v <= out_max + 1e-6)
+    values = [min(out_max, max(out_min, v)) for v in values]
+    # pin the narrowed endpoints as masters: without them the output would
+    # extrapolate below/above the lowest/highest sampled master
+    values = sorted(set(values) | {out_min, out_max})
+    if len(values) > _MAX_VARIABLE_MASTERS:
+        # pathological case: pin the endpoints and the default (the
+        # interpolation base), then thin out the rest evenly
+        pinned = sorted({values[0], de, values[-1]})
+        rest = [v for v in values if v not in pinned]
+        keep = _MAX_VARIABLE_MASTERS - len(pinned)
+        idx = sorted({round(i * (len(rest) - 1) / (keep - 1)) for i in range(keep)})
+        values = sorted(pinned + [rest[i] for i in idx])
+    locations = [
+        (m, min(cjk_axis[2], max(cjk_axis[0], _apply_weight_map(anchors, m))))
+        for m in values
+    ]
+    instances = _mono_instances(base, out_min, out_max)
+    layout_rules = _layout_rules(base, p, (out_min, de, out_max))
+    return {
+        "axis": (out_min, de, out_max),
+        "locations": locations,
+        "instances": instances,
+        "layout_rules": layout_rules,
+    }, []
+
+
+def _master_params(params, mono_wght, cjk_wght, ignore_mono_outline):
+    """Per-master params: pin wght per side, keep other axes as chosen."""
+    mp = copy.deepcopy(params)
+    variations = mp.setdefault("variations", {})
+    mono_loc = dict(variations.get("mono") or {})
+    mono_loc["wght"] = mono_wght
+    variations["mono"] = mono_loc
+    cjk_loc = dict(variations.get("cjk") or {})
+    cjk_loc["wght"] = cjk_wght
+    variations["cjk"] = cjk_loc
+    if ignore_mono_outline:
+        mono = mp.setdefault("mono", {})
+        mono["gsx"] = 1
+        mono["gsy"] = 1
+        mono["baseline"] = 0
+    return mp
+
+
+def _build_variable(masters, plan):
+    """Rebuild a wght variable font from static merged masters.
+
+    masters = [(mono_user_value, TTFont), ...]; plan carries the mono user
+    axis triple and the named instances to keep. The output axis is linear
+    over the mono range (source avar bends are approximated by the dense
+    master sampling).
+    """
+    from fontTools import varLib
+    from fontTools.designspaceLib import (
+        AxisDescriptor,
+        DesignSpaceDocument,
+        SourceDescriptor,
+    )
+    from fontTools.ttLib.tables._f_v_a_r import NamedInstance
+
+    axis = plan["axis"]
+    doc = DesignSpaceDocument()
+    ax = AxisDescriptor()
+    ax.name = "weight"
+    ax.tag = "wght"
+    ax.minimum, ax.default, ax.maximum = axis
+    doc.addAxis(ax)
+    for mono_wght, font in masters:
+        src = SourceDescriptor()
+        src.name = f"master.{mono_wght:g}"
+        src.location = {"weight": mono_wght}
+        src.font = font
+        doc.addSource(src)
+    base = min(masters, key=lambda m: abs(m[0] - axis[1]))[1]
+    # Layout tables are kept from the mono base and identical across masters;
+    # restore the default master's copy instead of merging them per master
+    # (varLib.build deletes excluded tables from the output).
+    saved = {
+        tag: base[tag]
+        for tag in ("GSUB", "GPOS", "GDEF", "BASE", "COLR")
+        if tag in base
+    }
+    vf, _, _ = varLib.build(
+        doc, exclude=["GSUB", "GPOS", "GDEF", "BASE", "COLR", "CFF2"]
+    )
+    for tag, table in saved.items():
+        if tag not in vf:
+            vf[tag] = table
+    seen = set()
+    if (_name_string(base, 17) or "").lower() == "regular":
+        # every shipping variable font names its default instance: Windows
+        # style matching/preview leans on it, and an instance-less fvar is
+        # the most exotic shape for older Windows code paths
+        regular = NamedInstance()
+        regular.subfamilyNameID = 17
+        regular.postscriptNameID = 0xFFFF
+        regular.coordinates = {"wght": axis[1]}
+        vf["fvar"].instances.append(regular)
+        seen.add(("regular", round(axis[1], 3)))
+    name_table = vf["name"]
+    used_ids = {rec.nameID for rec in name_table.names}
+    for wght, name in plan.get("instances", []):
+        key = (name.lower(), round(wght, 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        subfamily_id = 256
+        while subfamily_id in used_ids:
+            subfamily_id += 1
+        used_ids.add(subfamily_id)
+        name_table.setName(name, subfamily_id, 3, 1, 0x409)
+        try:
+            name.encode("mac_roman")
+        except UnicodeEncodeError:
+            pass
+        else:
+            name_table.setName(name, subfamily_id, 1, 0, 0)
+        inst = NamedInstance()
+        inst.subfamilyNameID = subfamily_id
+        inst.postscriptNameID = 0xFFFF
+        inst.coordinates = {"wght": wght}
+        vf["fvar"].instances.append(inst)
+    return vf
+
+
+def _quiet(_stage, _value=None):
+    """Progress sink for the per-master merges (only masters/varlib report)."""
+
+
+def _merge_variable(mono_path, cjk_path, params, p, report):
+    """Merge into a variable font; fall back to the static pipeline."""
+    base = TTFont(mono_path, fontNumber=p.mono_ttc_index)
+    cjk = TTFont(cjk_path, fontNumber=p.cjk_ttc_index)
+    plan, warnings = _variable_plan(base, cjk, p)
+    del base, cjk  # reloaded fresh per master below
+    if plan is None:
+        merged, meta = _merge_to_font(mono_path, cjk_path, params, _quiet)
+        meta["variable"] = False
+        meta["warnings"] = warnings
+        return merged, meta
+    # mono outline transforms redraw per master through cu2qu (not
+    # variation-aware) and would break point compatibility: ignore them.
+    # Advance multipliers stay variable through HVAR.
+    ignore_outline = p.mono_gsx != 1 or p.mono_gsy != 1 or p.mono_bl != 0
+    if ignore_outline:
+        warnings.append(_WARN_MONO_OUTLINE_IGNORED)
+    masters = []
+    master_meta = None
+    ymin_all = ymax_all = None
+    total = len(plan["locations"])
+    for i, (mono_wght, cjk_wght) in enumerate(plan["locations"]):
+        report("masters", int(i * 100 / total))
+        mp = _master_params(params, mono_wght, cjk_wght, ignore_outline)
+        merged, meta = _merge_to_font(mono_path, cjk_path, mp, _quiet)
+        if "STAT" in merged:
+            # drop the inherited STAT so varLib builds a fresh one
+            del merged["STAT"]
+        for tag in ("GSUB", "GPOS"):
+            # drop statically pruned FeatureVariations: the rules are rebuilt
+            # on the output axis below instead
+            table = merged.get(tag)
+            inner = getattr(table, "table", None) if table is not None else None
+            if (
+                inner is not None
+                and getattr(inner, "FeatureVariations", None) is not None
+            ):
+                del inner.FeatureVariations
+                inner.Version = 0x00010000
+        masters.append((mono_wght, merged))
+        if meta.get("ymin") is not None:
+            ymin_all = meta["ymin"] if ymin_all is None else min(ymin_all, meta["ymin"])
+        if meta.get("ymax") is not None:
+            ymax_all = meta["ymax"] if ymax_all is None else max(ymax_all, meta["ymax"])
+        if master_meta is None or mono_wght == plan["axis"][1]:
+            master_meta = meta
+    report("masters", 100)
+    report("varlib")
+    out = _build_variable(masters, plan)
+    from fontTools.varLib.featureVars import addFeatureVariations
+
+    for feature_tag in sorted(plan.get("layout_rules", {})):
+        region_subs = []
+        order = set(out.getGlyphOrder())
+        for region, subs in plan["layout_rules"][feature_tag]:
+            # the builder raises on missing glyphs; inapplicable rules are
+            # skipped instead of failing the whole merge
+            if set(subs) | set(subs.values()) <= order:
+                region_subs.append((region, subs))
+        if region_subs:
+            addFeatureVariations(out, region_subs, feature_tag)
+    if "OS/2" in out:
+        # usWin metrics are per-font constants (not interpolatable): cover
+        # the union of all masters' bounds so no weight clips on Windows
+        os2 = out["OS/2"]
+        if ymax_all is not None:
+            os2.usWinAscent = max(os2.usWinAscent, ceil(ymax_all))
+        if ymin_all is not None:
+            os2.usWinDescent = max(os2.usWinDescent, ceil(-ymin_all))
+    meta = dict(master_meta or {})
+    meta["variable"] = True
+    meta["warnings"] = warnings
+    meta["masters"] = total
+    return out, meta
+
+
+def _merge_to_font(mono_path, cjk_path, params, report):
+    """Run the static merge pipeline; returns (font, meta) without saving."""
     p = _read_params(params)
 
     report("load")
@@ -663,21 +1519,37 @@ def merge(mono_path, cjk_path, out_path, params, progress=None):
     _synthesize_names(base, cjk, p)
     mono = _update_metrics(base, p, mono_ref_adv, report)
     _sync_subfamily_style(base, p.style)
-    _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
+    ymin, ymax = _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
     _ensure_gasp(base)
+
+    return base, {
+        "added": added,
+        "upem": upem,
+        "format": p.fmt,
+        "subset_kept": subset_kept,
+        "mono": mono,
+        "ymin": ymin,
+        "ymax": ymax,
+    }
+
+
+def merge(mono_path, cjk_path, out_path, params, progress=None):
+    def report(stage, value=None):
+        if progress:
+            progress(stage, value)
+
+    p = _read_params(params)
+    if p.merge_wght:
+        base, meta = _merge_variable(mono_path, cjk_path, params, p, report)
+    else:
+        base, meta = _merge_to_font(mono_path, cjk_path, params, report)
 
     report("save")
     if p.fmt == "woff2":
         base.flavor = "woff2"  # brotli-compressed packaging of the same TTF
     # skip the table-reordering pass (it rewrites the whole file once more)
     base.save(out_path, reorderTables=None)
-    return {
-        "added": added,
-        "upem": upem,
-        "format": p.fmt,
-        "subset_kept": subset_kept,
-        "mono": mono,
-    }
+    return meta
 
 
 if __name__ == "__main__":
@@ -691,4 +1563,6 @@ if __name__ == "__main__":
             "flagged as monospace",
             file=sys.stderr,
         )
+    for code in meta.get("warnings", []):
+        print(f"warning: {_VARIABLE_WARNING_TEXTS.get(code, code)}", file=sys.stderr)
     print(json.dumps(meta))

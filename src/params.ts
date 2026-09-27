@@ -4,6 +4,8 @@ export interface Params {
   /** scale outlines only, advance untouched */
   monoGlyphScale: number;
   monoGlyphScaleY: number;
+  /** keep mono glyph X/Y scales equal */
+  monoAspectLock: boolean;
   /** advance multiplier */
   monoAdvMul: number;
   monoBaselineOffset: number;
@@ -24,6 +26,7 @@ export const DEFAULT_PARAMS: Params = {
   fontSize: 48,
   monoGlyphScale: 1,
   monoGlyphScaleY: 1,
+  monoAspectLock: true,
   monoAdvMul: 1,
   monoBaselineOffset: 0,
   cjkGlyphScale: 1,

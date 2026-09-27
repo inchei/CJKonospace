@@ -51,29 +51,33 @@ uv run wasm/merge_font.py mono.ttf cjk.ttf out.ttf params.json
 }
 ```
 
-| Key                        | Meaning                                                                                   |
-| -------------------------- | ----------------------------------------------------------------------------------------- |
-| `fs`                       | reference font size in px; only used to convert `baseline` offsets from px to font units  |
-| `lock2to1`                 | lock CJK advance to 2 × mono advance (the whole point of the tool)                        |
-| `lineHeight`               | multiplier for the recomputed ascent/descent (default `1.0`; gaps are always `0`)         |
-| `format`                   | output packaging: `ttf` (default) or `woff2`                                              |
-| `mono` / `cjk.advMul`      | advance multiplier                                                                        |
-| `mono` / `cjk.gsx`, `gsy`  | outline scale (glyph width / height), advance untouched                                   |
-| `mono` / `cjk.baseline`    | baseline offset in px (see `fs`)                                                          |
-| `mono` / `cjk.ttcIndex`    | face index when the input is a `.ttc` collection (default `0`)                            |
-| `variations.mono` / `.cjk` | variable-font instance location (axis tag → value), e.g. `{ "wght": 700 }`                |
-| `cjk.subset`               | keep only these codepoints in the CJK input, e.g. `{ "unicodes": [19968] }` (omit = full) |
+| Key                        | Meaning                                                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `fs`                       | reference font size in px; only used to convert `baseline` offsets from px to font units              |
+| `lock2to1`                 | lock CJK advance to 2 × mono advance (the whole point of the tool)                                    |
+| `lineHeight`               | multiplier for the recomputed ascent/descent (default `1.0`; gaps are always `0`)                     |
+| `format`                   | output packaging: `ttf` (default) or `woff2`                                                          |
+| `mono` / `cjk.advMul`      | advance multiplier                                                                                    |
+| `mono` / `cjk.gsx`, `gsy`  | outline scale (glyph width / height), advance untouched                                               |
+| `mono` / `cjk.baseline`    | baseline offset in px (see `fs`)                                                                      |
+| `mono` / `cjk.ttcIndex`    | face index when the input is a `.ttc` collection (default `0`)                                        |
+| `variations.mono` / `.cjk` | variable-font instance location (axis tag → value), e.g. `{ "wght": 700 }`                            |
+| `mergeWght`                | merge the shared `wght` axis into a variable output instead of pinning (see below)                    |
+| `weightMap`                | `[[mono, cjk], ...]` wght anchors (user values) pairing the two fonts; default aligns min/default/max |
+| `axisRange`                | `{"min": ..., "max": ...}` narrowed output wght range (default: full mono range)                      |
+| `cjk.subset`               | keep only these codepoints in the CJK input, e.g. `{ "unicodes": [19968] }` (omit = full)             |
 
 Notes:
 
 - Inputs may be TTF, OTF or WOFF2 (WOFF2 is decompressed first; the CLI declares the `brotli` dependency for this).
-- TTC collections are supported: pick a face with `ttcIndex` (default `0`). The web UI shows a face selector for multi-face collections and defaults to the face matching the UI language (e.g. `TC` for `zh-Hant`).
-- Variable-font inputs are pinned to a static instance via `variations.mono` / `variations.cjk` (fontTools `varLib.instancer`); axes are not merged into a variable output. The web UI exposes per-axis sliders and the font's named instances.
-- The CJK input can be subset with `cjk.subset.unicodes` (fontTools `subset`, applied before instancing/merging). The web UI offers presets (GBK, Big5, JIS X 0208, KS X 1001, 通用规范 3500/6500/8105) plus custom text; the preview simulates the subset, rendering excluded characters as .notdef.
+- TTC collections are supported: pick a face with `ttcIndex` (default `0`).
+- Variable-font inputs are pinned to a static instance via `variations.mono` / `variations.cjk` (fontTools `varLib.instancer`); an empty location pins every axis at its default.
+- With `mergeWght`, the shared `wght` axis is merged into a variable output instead of pinning. Both inputs must be variable `glyf`/`gvar` fonts with a `wght` axis (otherwise falls back to static with a warning); the output spans the mono range, keeps its named instances and `rvrn` swaps, and pairs masters through `weightMap` anchors.
+- The CJK input can be subset with `cjk.subset.unicodes` (fontTools `subset`, applied before instancing/merging).
 - Output outlines are always TrueType (`glyf`); set `format: "woff2"` to get a WOFF2 package of the same font. A CFF/OTF mono base is converted (cu2qu; CFF hinting is dropped).
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.
 - Vertical metrics (`hhea` ascent/descent, `OS/2` typo + win metrics) are recomputed from both fonts to cover every glyph, so tall CJK glyphs are not clipped. `hhea.lineGap` and `OS/2.sTypoLineGap` are forced to `0`, since terminals interpret a positive gap inconsistently.
-- The result is flagged monospace (`post.isFixedPitch = 1`, `OS/2.panose.bProportion = 9`; `OS/2.xAvgCharWidth` = half-width; a `gasp` table is added when missing) only when the mono base's printable-ASCII glyphs actually share one advance (CJK is full-width 2x by design and is not part of this check; a base with no ASCII glyph also counts as not monospaced). A proportional base keeps its own flags, and the web UI warns that the generated font will not be flagged monospace.
+- The result is flagged monospace (`post.isFixedPitch = 1`, `OS/2.panose.bProportion = 9`; `OS/2.xAvgCharWidth` = half-width; a `gasp` table is added when missing) only when the mono base's printable-ASCII glyphs actually share one advance (CJK is full-width 2x by design and is not part of this check; a base with no ASCII glyph also counts as not monospaced). A proportional base keeps its own flags.
 - `styleName` is freely typed and sets the output subfamily (name IDs 2/17/22) and style metadata (`OS/2.usWeightClass`, `OS/2.usWidthClass`, `fsSelection`, `head.macStyle`), using the keyword mapping from the [OpenType name examples](https://learn.microsoft.com/en-us/typography/opentype/spec/namesmp). It can be left empty to inherit the mono base's subfamily and keep its style metadata unchanged.
 
 ## License

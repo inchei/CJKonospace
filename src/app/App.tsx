@@ -53,6 +53,7 @@ import { SystemFontPicker } from "@/components/SystemFontPicker";
 
 const CJK_BG = "#ff85a1";
 const MONO_BG = "#70d6ff";
+const MERGE_BG = "#ffd166";
 const REPO_URL = "https://github.com/inchei/CJKonospace";
 
 // long labels in the narrow sidebar: wrap instead of overflowing the fixed-height,
@@ -227,6 +228,56 @@ function NumberField({
   );
 }
 
+/** One numeric param as a NumberField + Slider row (see SLIDERS). */
+function SliderRow({
+  def,
+  value,
+  disabled,
+  onCommit,
+}: {
+  def: SliderDef;
+  value: number;
+  disabled: boolean;
+  onCommit: (v: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <Label className="text-xs">{t(def.labelKey)}</Label>
+        <NumberField
+          value={value}
+          min={def.min}
+          max={def.max}
+          step={def.step}
+          format={def.format}
+          color={
+            def.slot === "cjk"
+              ? CJK_BG
+              : def.slot === "mono"
+                ? MONO_BG
+                : undefined
+          }
+          ariaLabel={t(def.labelKey)}
+          onCommit={onCommit}
+        />
+      </div>
+      <Slider
+        value={[value]}
+        min={def.min}
+        max={def.max}
+        step={def.step}
+        onValueChange={(v) => {
+          const arr = Array.isArray(v) ? v : [v];
+          onCommit(arr[0] ?? value);
+        }}
+        disabled={disabled}
+        className="pb-2"
+      />
+    </div>
+  );
+}
+
 interface SlotState {
   font: LoadedFont | null;
   error: string | null;
@@ -248,6 +299,84 @@ interface SlotState {
 function defaultCoords(v?: LoadedFont["variation"]): Record<string, number> {
   if (!v) return {};
   return Object.fromEntries(v.axes.map((a) => [a.tag, a.default]));
+}
+
+interface AxisRange {
+  min: number;
+  default: number;
+  max: number;
+}
+
+/** wght axis of a loaded font, if it is a variable font with one. */
+function wghtAxis(font: LoadedFont | null): AxisRange | undefined {
+  const axis = font?.variation?.axes.find((a) => a.tag === "wght");
+  if (!axis) return undefined;
+  return { min: axis.min, default: axis.default, max: axis.max };
+}
+
+/** One mono -> CJK wght correspondence point (both in user-space values). */
+interface WeightAnchor {
+  mono: number;
+  cjk: number;
+}
+
+/** Default map: align the two fonts' min/default/max. */
+function defaultWeightMap(mono: AxisRange, cjk: AxisRange): WeightAnchor[] {
+  return [
+    { mono: mono.min, cjk: cjk.min },
+    { mono: mono.default, cjk: cjk.default },
+    { mono: mono.max, cjk: cjk.max },
+  ];
+}
+
+/**
+ * Piecewise-linear mono -> CJK through the anchors (sorted by mono);
+ * clamps outside the anchor span. Handles uneven ranges and uneven
+ * weight-change speeds between the two fonts.
+ */
+function mapWeight(anchors: WeightAnchor[], value: number): number {
+  const sorted = [...anchors].sort((a, b) => a.mono - b.mono);
+  if (sorted.length === 0) return value;
+  const first = sorted[0]!;
+  if (value <= first.mono) return first.cjk;
+  const last = sorted[sorted.length - 1]!;
+  if (value >= last.mono) return last.cjk;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i]!;
+    const b = sorted[i + 1]!;
+    if (value >= a.mono && value <= b.mono) {
+      const span = b.mono - a.mono;
+      const t = span === 0 ? 0 : (value - a.mono) / span;
+      return a.cjk + t * (b.cjk - a.cjk);
+    }
+  }
+  return last.cjk;
+}
+
+/** Clamp anchor lists to both axes' ranges and keep them sorted/monotonic. */
+function sanitizeAnchors(
+  anchors: WeightAnchor[],
+  mono: AxisRange,
+  cjk: AxisRange,
+): WeightAnchor[] {
+  const clamped = anchors.map((a) => ({
+    mono: Math.min(mono.max, Math.max(mono.min, a.mono)),
+    cjk: Math.min(cjk.max, Math.max(cjk.min, a.cjk)),
+  }));
+  clamped.sort((a, b) => a.mono - b.mono);
+  for (let i = 1; i < clamped.length; i++) {
+    if (clamped[i]!.cjk < clamped[i - 1]!.cjk) {
+      clamped[i]!.cjk = clamped[i - 1]!.cjk;
+    }
+  }
+  return clamped;
+}
+
+/** Drop the wght entry: in merge mode it is interpolated, not pinned. */
+function stripWght(coords: Record<string, number>): Record<string, number> {
+  const rest = { ...coords };
+  delete rest.wght;
+  return rest;
 }
 
 /** Prefer the TTC face matching the UI language (Noto CJK ships JP/KR/SC/TC/HK). */
@@ -315,14 +444,67 @@ export default function App() {
     fileName?: string;
     added?: number;
     format?: string;
+    variable?: boolean;
+    warnings?: string[];
   }>({ status: "idle" });
   // advanced generation options (also settable via CLI params.json)
   const [advFamily, setAdvFamily] = useState("");
   const [advStyle, setAdvStyle] = useState("");
   const [advFormat, setAdvFormat] = useState<"ttf" | "woff2">("ttf");
+  // merge the shared wght axis into a variable output (both fonts must expose it)
+  const [advMergeWght, setAdvMergeWght] = useState(false);
+  /** shared preview weight on the mono wght user scale (null = mono default) */
+  const [weightPreview, setWeightPreview] = useState<number | null>(null);
+  /**
+   * mono -> CJK wght anchor map (null = fvar-derived defaults);
+   * the backend pairs masters through this map, so uneven ranges and
+   * uneven weight-change speeds stay aligned
+   */
+  const [weightMap, setWeightMap] = useState<WeightAnchor[] | null>(null);
+  /** output wght range override (null = mono endpoint); narrows the axis */
+  const [axisMin, setAxisMin] = useState<number | null>(null);
+  const [axisMax, setAxisMax] = useState<number | null>(null);
   const monoIsMonospace = useMemo(
     () => (mono.font ? isMonospace(mono.font.font) : true),
     [mono.font],
+  );
+  const monoWght = wghtAxis(mono.font);
+  const cjkWght = wghtAxis(cjk.font);
+  // a new font brings a new fvar: drop custom anchors/range back to defaults
+  useEffect(() => {
+    setWeightMap(null);
+    setAxisMin(null);
+    setAxisMax(null);
+  }, [mono.font, cjk.font]);
+  /** merge mode is only real when the user opted in and both fonts expose wght */
+  const mergeActive = advMergeWght && Boolean(monoWght && cjkWght);
+  /** narrowed output range on the mono wght user scale (defaults = full range) */
+  const outMin = axisMin ?? monoWght?.min ?? 100;
+  const outMax = axisMax ?? monoWght?.max ?? 900;
+  const anchors: WeightAnchor[] =
+    mergeActive && monoWght && cjkWght
+      ? (weightMap ?? defaultWeightMap(monoWght, cjkWght))
+      : [];
+  /** preview weight on the mono wght user scale; the output axis follows mono */
+  const previewWeight = weightPreview ?? monoWght?.default ?? 400;
+  const previewMonoWght = monoWght
+    ? Math.min(outMax, Math.max(outMin, previewWeight))
+    : previewWeight;
+  // CJK follows the anchor map, so mismatched ranges/speeds stay aligned
+  const previewCjkWght = mergeActive
+    ? mapWeight(anchors, previewMonoWght)
+    : undefined;
+  const effMonoCoords = useMemo(
+    () =>
+      mergeActive ? { ...mono.coords, wght: previewMonoWght } : mono.coords,
+    [mergeActive, mono.coords, previewMonoWght],
+  );
+  const effCjkCoords = useMemo(
+    () =>
+      mergeActive && previewCjkWght !== undefined
+        ? { ...cjk.coords, wght: previewCjkWght }
+        : cjk.coords,
+    [mergeActive, cjk.coords, previewCjkWght],
   );
   const genUrlRef = useRef<string | null>(null);
   const genBytesRef = useRef<ArrayBuffer | null>(null);
@@ -413,8 +595,21 @@ export default function App() {
           ? { subset: { unicodes: subsetUnicodes } }
           : {}),
       },
-      // static instance location per font; {} means "keep as-is"
-      variations: { mono: mono.coords, cjk: cjk.coords },
+      // static instance location per font; {} means "keep as-is".
+      // in wght-merge mode the wght entry is interpolated, not pinned
+      variations: {
+        mono: mergeActive ? stripWght(mono.coords) : mono.coords,
+        cjk: mergeActive ? stripWght(cjk.coords) : cjk.coords,
+      },
+      // merge the shared wght axis into a variable output (Python side)
+      mergeWght: mergeActive,
+      // anchor map the backend pairs masters through: [mono user, cjk user]
+      ...(mergeActive
+        ? {
+            weightMap: anchors.map((a) => [a.mono, a.cjk]),
+            axisRange: { min: outMin, max: outMax },
+          }
+        : {}),
     };
   }
 
@@ -472,6 +667,9 @@ export default function App() {
         fileName: `${family}.${format}`,
         added: meta.added,
         format,
+        // the backend is the source of truth (it may fall back to static)
+        variable: Boolean(meta.variable),
+        warnings: meta.warnings ?? [],
       });
     } catch (e) {
       setGen({
@@ -513,15 +711,24 @@ export default function App() {
           monoFont: mono.font,
           params,
           overrides: {},
-          monoCoords: mono.coords,
-          cjkCoords: cjk.coords,
+          monoCoords: effMonoCoords,
+          cjkCoords: effCjkCoords,
           subsetUnicodes,
-          shapeMono: (font, text) => shapeMonoRun(font, text, mono.coords),
+          shapeMono: (font, text) => shapeMonoRun(font, text, effMonoCoords),
         },
         { showGrid, hint: t("previewHint") },
       );
     }
-  }, [cjk, mono, params, showGrid, t, subsetUnicodes]);
+  }, [
+    cjk,
+    mono,
+    params,
+    showGrid,
+    t,
+    subsetUnicodes,
+    effMonoCoords,
+    effCjkCoords,
+  ]);
 
   useEffect(draw, [draw, showGrid]);
 
@@ -648,6 +855,50 @@ export default function App() {
     setter((s) => ({ ...s, coords: { ...s.coords, ...coords } }));
   }
 
+  /** Edit one weight-map anchor (materializing the defaults on first edit). */
+  function commitAnchor(index: number, patch: Partial<WeightAnchor>) {
+    if (!monoWght || !cjkWght) return;
+    const base = weightMap ?? defaultWeightMap(monoWght, cjkWght);
+    const next = base.map((a, i) => (i === index ? { ...a, ...patch } : a));
+    setWeightMap(sanitizeAnchors(next, monoWght, cjkWght));
+  }
+
+  /** Drop an anchor (at least two must remain to define the map). */
+  function removeAnchor(index: number) {
+    if (!monoWght || !cjkWght) return;
+    const base = weightMap ?? defaultWeightMap(monoWght, cjkWght);
+    if (base.length <= 2) return;
+    setWeightMap(
+      sanitizeAnchors(
+        base.filter((_, i) => i !== index),
+        monoWght,
+        cjkWght,
+      ),
+    );
+  }
+
+  /** Insert an anchor in the middle of the widest mono gap, on the curve. */
+  function addAnchor() {
+    if (!monoWght || !cjkWght) return;
+    const base = [...(weightMap ?? defaultWeightMap(monoWght, cjkWght))].sort(
+      (a, b) => a.mono - b.mono,
+    );
+    if (base.length < 2) return;
+    let gapIndex = 0;
+    let gapSize = -Infinity;
+    for (let i = 0; i < base.length - 1; i++) {
+      const size = base[i + 1]!.mono - base[i]!.mono;
+      if (size > gapSize) {
+        gapSize = size;
+        gapIndex = i;
+      }
+    }
+    const a = base[gapIndex]!;
+    const b = base[gapIndex + 1]!;
+    const mid = { mono: (a.mono + b.mono) / 2, cjk: (a.cjk + b.cjk) / 2 };
+    setWeightMap(sanitizeAnchors([...base, mid], monoWght, cjkWght));
+  }
+
   /** Download a monospace preset (same sources as syntaxFont) through the shared loadFont path */
   async function downloadPreset(slot: "cjk" | "mono", preset: MonoPreset) {
     const setter = slot === "cjk" ? setCjk : setMono;
@@ -682,6 +933,8 @@ export default function App() {
     if (stage === "runtime") return t("gen.stageRuntime");
     if (stage === "packages") return t("gen.stagePackages");
     if (stage === "instance") return t("gen.stageInstance");
+    if (stage === "masters") return t("gen.stageMasters");
+    if (stage === "varlib") return t("gen.stageVarlib");
     if (stage === "subset") return t("gen.stageSubset");
     if (stage === "convert") return t("gen.stageConvert");
     if (stage === "cjk") return t("gen.stageMerge");
@@ -691,9 +944,23 @@ export default function App() {
     return t("gen.downloading");
   }
 
-  /** Set a numeric param, mirroring CJK X/Y when the aspect ratio is locked. */
+  /** Backend warning codes (merge_font.py meta["warnings"]) -> UI text. */
+  function warningText(code: string) {
+    if (code === "no-wght-axis") return t("gen.warnNoWghtAxis");
+    if (code === "cff-variable") return t("gen.warnCffVariable");
+    if (code === "mono-outline-ignored") return t("gen.warnMonoOutline");
+    return code;
+  }
+
+  /** Set a numeric param, mirroring glyph X/Y when an aspect ratio is locked. */
   const setNum = (key: keyof Params, value: number) =>
     setParams((p) => {
+      if (p.monoAspectLock && key === "monoGlyphScale") {
+        return { ...p, monoGlyphScale: value, monoGlyphScaleY: value };
+      }
+      if (p.monoAspectLock && key === "monoGlyphScaleY") {
+        return { ...p, monoGlyphScale: value, monoGlyphScaleY: value };
+      }
       if (p.cjkAspectLock && key === "cjkGlyphScale") {
         return { ...p, cjkGlyphScale: value, cjkGlyphScaleY: value };
       }
@@ -783,6 +1050,7 @@ export default function App() {
                 onAxis={(tag, v) => setAxis("cjk", tag, v)}
                 onInstance={(c) => setInstance("cjk", c)}
                 vfWarningLabel={t("load.vfWarning")}
+                hideWght={mergeActive}
                 onSystemFont={
                   supportsSystemFonts ? () => openSystemFonts("cjk") : undefined
                 }
@@ -826,7 +1094,7 @@ export default function App() {
                 instanceLabel={t("load.instance")}
                 onAxis={(tag, v) => setAxis("mono", tag, v)}
                 onInstance={(c) => setInstance("mono", c)}
-                vfWarningLabel={t("load.vfWarning")}
+                hideWght={mergeActive}
                 onSystemFont={
                   supportsSystemFonts
                     ? () => openSystemFonts("mono")
@@ -862,57 +1130,225 @@ export default function App() {
                 {t("params.lock")}
               </label>
 
-              <label className="flex items-center gap-2 text-sm font-base">
-                <Checkbox
-                  checked={params.cjkAspectLock}
-                  onCheckedChange={(checked) =>
-                    set("cjkAspectLock", Boolean(checked))
-                  }
-                  aria-label={t("params.cjkAspectLock")}
-                />
-                {t("params.cjkAspectLock")}
-              </label>
-
-              {SLIDERS.map((def) => {
-                const value = params[def.key] as number;
-                const disabled = def.disabledWhen?.(params) ?? false;
-                return (
-                  <div key={def.key}>
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <Label className="text-xs">{t(def.labelKey)}</Label>
-                      <NumberField
-                        value={value}
-                        min={def.min}
-                        max={def.max}
-                        step={def.step}
-                        format={def.format}
-                        color={
-                          def.slot === "cjk"
-                            ? CJK_BG
-                            : def.slot === "mono"
-                              ? MONO_BG
-                              : undefined
-                        }
-                        ariaLabel={t(def.labelKey)}
-                        onCommit={(v) => setNum(def.key, v)}
-                      />
+              <Accordion>
+                <AccordionItem value="cjk">
+                  <AccordionTrigger
+                    className="p-2 text-xs"
+                    style={{ backgroundColor: CJK_BG, color: "#0a0a0a" }}
+                  >
+                    {t("load.cjk")}
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="flex flex-col gap-4">
+                      <label className="flex items-center gap-2 text-sm font-base">
+                        <Checkbox
+                          checked={params.cjkAspectLock}
+                          onCheckedChange={(checked) =>
+                            set("cjkAspectLock", Boolean(checked))
+                          }
+                          aria-label={t("params.cjkAspectLock")}
+                        />
+                        {t("params.cjkAspectLock")}
+                      </label>
+                      {SLIDERS.filter((d) => d.slot === "cjk").map((def) => (
+                        <SliderRow
+                          key={def.key}
+                          def={def}
+                          value={params[def.key] as number}
+                          disabled={def.disabledWhen?.(params) ?? false}
+                          onCommit={(v) => setNum(def.key, v)}
+                        />
+                      ))}
                     </div>
-                    <Slider
-                      value={[value]}
-                      min={def.min}
-                      max={def.max}
-                      step={def.step}
-                      onValueChange={(v) => {
-                        const arr = Array.isArray(v) ? v : [v];
-                        const nv = arr[0] ?? value;
-                        setNum(def.key, nv);
-                      }}
-                      disabled={disabled}
-                      className="pb-2"
-                    />
-                  </div>
-                );
-              })}
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+
+              <Accordion>
+                <AccordionItem value="mono">
+                  <AccordionTrigger
+                    className="p-2 text-xs"
+                    style={{ backgroundColor: MONO_BG, color: "#0a0a0a" }}
+                  >
+                    {t("load.mono")}
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="flex flex-col gap-4">
+                      <label className="flex items-center gap-2 text-sm font-base">
+                        <Checkbox
+                          checked={params.monoAspectLock}
+                          onCheckedChange={(checked) =>
+                            set("monoAspectLock", Boolean(checked))
+                          }
+                          aria-label={t("params.monoAspectLock")}
+                        />
+                        {t("params.monoAspectLock")}
+                      </label>
+                      {SLIDERS.filter((d) => !d.slot || d.slot === "mono").map(
+                        (def) => (
+                          <SliderRow
+                            key={def.key}
+                            def={def}
+                            value={params[def.key] as number}
+                            disabled={def.disabledWhen?.(params) ?? false}
+                            onCommit={(v) => setNum(def.key, v)}
+                          />
+                        ),
+                      )}
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+
+              {monoWght && cjkWght && (
+                <Accordion>
+                  <AccordionItem value="merge">
+                    <AccordionTrigger
+                      className="p-2 text-xs"
+                      style={{ backgroundColor: MERGE_BG, color: "#0a0a0a" }}
+                    >
+                      {t("gen.mergeAxis")}
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex flex-col gap-4">
+                        <Badge className="bg-main text-black whitespace-normal">
+                          {t("load.vfWarning")}
+                        </Badge>
+                        <label className="flex items-center gap-2 text-sm font-base">
+                          <Checkbox
+                            checked={advMergeWght}
+                            onCheckedChange={(c) => setAdvMergeWght(Boolean(c))}
+                            aria-label={t("gen.mergeWght")}
+                          />
+                          {t("gen.mergeWght")}
+                        </label>
+
+                        {mergeActive && monoWght && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-heading text-xs whitespace-nowrap">
+                              {t("gen.axisRange")}
+                            </span>
+                            <NumberField
+                              value={outMin}
+                              min={monoWght.min}
+                              max={Math.max(monoWght.min, outMax - 1)}
+                              step={1}
+                              color={MONO_BG}
+                              ariaLabel={`${t("gen.axisRange")} min`}
+                              onCommit={(v) => setAxisMin(v)}
+                            />
+                            <span
+                              aria-hidden="true"
+                              className="shrink-0 text-xs"
+                            >
+                              –
+                            </span>
+                            <NumberField
+                              value={outMax}
+                              min={Math.min(monoWght.max, outMin + 1)}
+                              max={monoWght.max}
+                              step={1}
+                              color={MONO_BG}
+                              ariaLabel={`${t("gen.axisRange")} max`}
+                              onCommit={(v) => setAxisMax(v)}
+                            />
+                          </div>
+                        )}
+
+                        {mergeActive && monoWght && (
+                          <div>
+                            <div className="mb-1 flex items-center justify-between gap-2">
+                              <Label className="text-xs">
+                                {t("gen.previewWeight")}
+                              </Label>
+                              <NumberField
+                                value={previewWeight}
+                                min={outMin}
+                                max={outMax}
+                                step={1}
+                                ariaLabel={t("gen.previewWeight")}
+                                onCommit={(v) => setWeightPreview(v)}
+                              />
+                            </div>
+                            <Slider
+                              value={[previewWeight]}
+                              min={outMin}
+                              max={outMax}
+                              step={1}
+                              onValueChange={(v) => {
+                                const arr = Array.isArray(v) ? v : [v];
+                                setWeightPreview(arr[0] ?? previewWeight);
+                              }}
+                              className="pb-2"
+                            />
+                          </div>
+                        )}
+                        {mergeActive && monoWght && cjkWght && (
+                          <div className="flex flex-col gap-1.5">
+                            <span className="font-heading text-xs">
+                              {t("gen.weightMap")}
+                            </span>
+                            {anchors.map((a, i) => (
+                              <div
+                                key={i}
+                                className="flex flex-wrap items-center gap-1.5"
+                              >
+                                <NumberField
+                                  value={a.mono}
+                                  min={monoWght.min}
+                                  max={monoWght.max}
+                                  step={1}
+                                  color={MONO_BG}
+                                  ariaLabel={`${t("gen.weightMap")} mono`}
+                                  onCommit={(v) => commitAnchor(i, { mono: v })}
+                                />
+                                <span
+                                  aria-hidden="true"
+                                  className="shrink-0 text-xs"
+                                >
+                                  →
+                                </span>
+                                <NumberField
+                                  value={a.cjk}
+                                  min={cjkWght.min}
+                                  max={cjkWght.max}
+                                  step={1}
+                                  color={CJK_BG}
+                                  ariaLabel={`${t("gen.weightMap")} CJK`}
+                                  onCommit={(v) => commitAnchor(i, { cjk: v })}
+                                />
+                                <Button
+                                  type="button"
+                                  variant="neutral"
+                                  size="icon-sm"
+                                  className="shrink-0"
+                                  disabled={anchors.length <= 2}
+                                  onClick={() => removeAnchor(i)}
+                                  aria-label={t("gen.weightMapRemove")}
+                                >
+                                  ✕
+                                </Button>
+                              </div>
+                            ))}
+                            <Button
+                              type="button"
+                              variant="neutral"
+                              size="sm"
+                              className={WRAP_BTN}
+                              onClick={addAnchor}
+                            >
+                              {t("gen.weightMapAdd")}
+                            </Button>
+                            <p className="text-xs font-base opacity-70">
+                              {t("gen.weightMapHint")}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              )}
 
               <Button
                 variant="neutral"
@@ -997,7 +1433,20 @@ export default function App() {
                     <span className="text-xs font-base">
                       {gen.added} glyphs
                     </span>
+                    {gen.variable && (
+                      <span className="text-xs font-base">
+                        · {t("gen.variableOut")}
+                      </span>
+                    )}
                   </div>
+                  {(gen.warnings ?? []).map((w) => (
+                    <p
+                      key={w}
+                      className="text-xs font-base break-words opacity-70"
+                    >
+                      ⚠ {warningText(w)}
+                    </p>
+                  ))}
                   <a
                     href={gen.url}
                     download={gen.fileName}
@@ -1195,6 +1644,7 @@ function FontSlotInfo({
   onSystemFont,
   systemFontLabel,
   warning,
+  hideWght,
 }: {
   label: string;
   color: string;
@@ -1227,10 +1677,15 @@ function FontSlotInfo({
   onSystemFont?: () => void;
   systemFontLabel?: string;
   warning?: string;
+  /** hide the wght axis row: in merge mode it is driven by the shared preview */
+  hideWght?: boolean;
 }) {
   const font = slot.font;
   const meta = font?.meta;
   const variation = font?.variation;
+  const visibleAxes = variation
+    ? variation.axes.filter((a) => !(hideWght && a.tag === "wght"))
+    : [];
   const instanceIndex =
     variation && variation.instances.length > 0
       ? variation.instances.findIndex((inst) =>
@@ -1400,11 +1855,13 @@ function FontSlotInfo({
           {warning}
         </div>
       )}
-      {variation && variation.axes.length > 0 && (
+      {variation && visibleAxes.length > 0 && (
         <div className="flex flex-col gap-2 rounded-base border-2 border-border bg-secondary-background p-2">
-          <Badge className="bg-main text-black whitespace-normal">
-            {vfWarningLabel}
-          </Badge>
+          {vfWarningLabel && (
+            <Badge className="bg-main text-black whitespace-normal">
+              {vfWarningLabel}
+            </Badge>
+          )}
           {variation.instances.length > 0 && (
             <label className="flex flex-col gap-1 text-xs font-base">
               <span className="font-heading">{instanceLabel}</span>
@@ -1427,7 +1884,7 @@ function FontSlotInfo({
               </select>
             </label>
           )}
-          {variation.axes.map((axis) => {
+          {visibleAxes.map((axis) => {
             const value = slot.coords[axis.tag] ?? axis.default;
             return (
               <div key={axis.tag} className="flex flex-col gap-1">

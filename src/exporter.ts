@@ -5,7 +5,14 @@ export interface ExportProgress {
 
 export interface GenerateResult {
   data: ArrayBuffer;
-  meta: { added?: number; upem?: number };
+  meta: {
+    added?: number;
+    upem?: number;
+    /** true when the output kept the merged wght axis (variable font) */
+    variable?: boolean;
+    /** backend warning codes (no-wght-axis, cff-variable, mono-outline-ignored) */
+    warnings?: string[];
+  };
 }
 
 interface Request {
