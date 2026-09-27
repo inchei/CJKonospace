@@ -19,7 +19,7 @@ import {
 import { renderPreview } from "@/preview";
 import { ensureShaping, shapeMonoRun } from "@/shaper";
 import { generateFont, type ExportProgress } from "@/exporter";
-import { buildStandaloneScript } from "@/lib/mergeScript";
+import { buildStandaloneArchive, fontFileName } from "@/lib/mergeScript";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
@@ -512,6 +512,8 @@ export default function App() {
     busy: false,
     error: null,
   });
+  // offline bundle export in progress (fflate import + zip, usually < 2s)
+  const [exportBusy, setExportBusy] = useState(false);
   // CJK subset: preset ranges + custom text, resolved to codepoints lazily
   const [subset, setSubset] = useState<SubsetState>(SUBSET_DEFAULT);
   const [subsetUnicodes, setSubsetUnicodes] = useState<number[] | null>(null);
@@ -613,23 +615,41 @@ export default function App() {
     };
   }
 
-  function download(filename: string, content: string, type: string) {
-    const url = URL.createObjectURL(new Blob([content], { type }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  /** Export a self-contained build.py (fontTools only, params baked in). */
-  function handleExportBuild() {
-    if (!mono.font || !cjk.font) return;
-    download(
-      "build.py",
-      buildStandaloneScript(buildMergePayload()),
-      "text/x-python",
-    );
+  /** Export an offline bundle (build.py + both fonts): unzip and `uv run build.py`. */
+  async function handleExportBuild() {
+    const monoFont = mono.font;
+    const cjkFont = cjk.font;
+    if (!monoFont || !cjkFont || exportBusy) return;
+    setExportBusy(true);
+    try {
+      const pick = (
+        font: LoadedFont,
+        ttc: SlotState["ttc"],
+      ): { name: string; data: Uint8Array } => {
+        // TTC slots contribute the whole collection (face picked via ttcIndex);
+        // otherwise the (possibly woff2-decompressed) sfnt, extension fixed
+        // to match the actual bytes
+        const raw = ttc?.buffer ?? font.buffer;
+        const data = new Uint8Array(raw);
+        return {
+          name: fontFileName(ttc?.fileName ?? font.meta.fileName, data),
+          data,
+        };
+      };
+      const { blob, zipName } = await buildStandaloneArchive({
+        mono: pick(monoFont, mono.ttc),
+        cjk: pick(cjkFont, cjk.ttc),
+        params: buildMergePayload(),
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = zipName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } finally {
+      setExportBusy(false);
+    }
   }
 
   async function handleGenerate() {
@@ -1497,7 +1517,7 @@ export default function App() {
                   variant="neutral"
                   size="sm"
                   onClick={handleExportBuild}
-                  disabled={!mono.font || !cjk.font}
+                  disabled={!mono.font || !cjk.font || exportBusy}
                 >
                   {t("gen.exportBuild")}
                 </Button>
