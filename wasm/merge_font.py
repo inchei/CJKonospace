@@ -342,6 +342,36 @@ def _numpy_move_simple(data, ncont, sx, sy, dx, dy):
     return new
 
 
+def _numpy_move_loaded(g, sx, sy, dx, dy):
+    """Vectorized scale/translate of an already-expanded simple glyph.
+
+    The variable-font path instances each source before merging, so its glyphs
+    carry coordinates but no raw bytes. This mirrors the pure-Python loop at the
+    end of _move_glyf_glyph without the per-point cost. Returns None for an
+    empty coordinate array so the caller can fall back.
+    """
+    np = _numpy
+    flat = np.frombuffer(g.coordinates._a, dtype=np.float64).copy()
+    if not flat.size:
+        return None
+    flat[0::2] = flat[0::2] * sx + dx
+    flat[1::2] = flat[1::2] * sy + dy
+    new = Glyph()
+    new.numberOfContours = g.numberOfContours
+    new.endPtsOfContours = list(g.endPtsOfContours)
+    new.flags = list(g.flags)
+    if hasattr(g, "program"):
+        new.program = g.program
+    new.coordinates = GlyphCoordinates.zeros(flat.size // 2)
+    new.coordinates._a = array.array("d")
+    new.coordinates._a.frombytes(flat.tobytes())
+    new.xMin = otRound(flat[0::2].min())
+    new.yMin = otRound(flat[1::2].min())
+    new.xMax = otRound(flat[0::2].max())
+    new.yMax = otRound(flat[1::2].max())
+    return new
+
+
 def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
     """Build a transformed copy of a glyf glyph.
 
@@ -352,8 +382,9 @@ def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
     caller redraws with a pen.
     """
     # Simple glyphs still holding their raw glyf bytes go through the numpy
-    # decoder without ever expanding them; composites and already-expanded
-    # glyphs (e.g. instanced variable sources) use the pure-Python path below.
+    # decoder without ever expanding them; already-expanded simple glyphs
+    # (e.g. instanced variable sources) go through the numpy transform. Only
+    # composites and the no-numpy worker use the pure-Python path below.
     raw = src_glyf.glyphs.get(name)
     data = getattr(raw, "data", None) if raw is not None else None
     if _numpy is not None and data and len(data) >= 12:
@@ -384,6 +415,10 @@ def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
         empty = Glyph()  # empty glyph (no contours)
         empty.numberOfContours = 0
         return empty
+    if _numpy is not None:
+        moved = _numpy_move_loaded(g, sx, sy, dx, dy)
+        if moved is not None:
+            return moved
     new = Glyph()
     new.numberOfContours = g.numberOfContours
     new.endPtsOfContours = list(g.endPtsOfContours)
