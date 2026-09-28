@@ -72,7 +72,7 @@ Notes:
 - Inputs may be TTF, OTF or WOFF2 (WOFF2 is decompressed first; the CLI declares the `brotli` dependency for this).
 - TTC collections are supported: pick a face with `ttcIndex` (default `0`).
 - Variable-font inputs are pinned to a static instance via `variations.mono` / `variations.cjk` (fontTools `varLib.instancer`); an empty location pins every axis at its default.
-- With `mergeWght`, the shared `wght` axis is merged into a variable output instead of pinning. Both inputs must be variable `glyf`/`gvar` fonts with a `wght` axis (otherwise falls back to static with a warning); the output spans the mono range, keeps its named instances and `rvrn` swaps, and pairs masters through `weightMap` anchors.
+- With `mergeWght`, the shared `wght` axis is merged into a variable output instead of pinning. Both inputs must be variable `glyf`/`gvar` fonts with a `wght` axis (otherwise falls back to static with a warning); the output spans the mono range, keeps the mono base's avar weight curve, its named instances and `rvrn` swaps, and pairs the two fonts' masters through `weightMap` anchors.
 - The CJK input can be subset with `cjk.subset.unicodes` (fontTools `subset`, applied before instancing/merging).
 - Output outlines are always TrueType (`glyf`); set `format: "woff2"` to get a WOFF2 package of the same font. A CFF/OTF mono base is converted (cu2qu; CFF hinting is dropped).
 - The tool does not touch hinting, so scaled CJK glyphs keep their original instructions.

@@ -1091,6 +1091,34 @@ def _normalize_linear(value, triple):
     return 0.0 if hi == de else (value - de) / (hi - de)
 
 
+def _denormalize_linear(n, triple):
+    """Normalized coordinate -> user-space value on a linear axis."""
+    lo, de, hi = triple
+    if n <= 0:
+        return de + n * (de - lo)
+    return de + n * (hi - de)
+
+
+def _avar_segments(base, out_triple):
+    """The mono base's wght avar segments, or None when not carryable.
+
+    Only meaningful when the output keeps the mono base's full user range:
+    narrowing re-normalizes the design space, so a straight copy would
+    misplace the curve. avar v2 (VarStore) is left to the linear fallback.
+    """
+    mono_axis = _fvar_axis(base, "wght")
+    if mono_axis is None or any(
+        abs(a - b) > 1e-6 for a, b in zip(mono_axis, out_triple, strict=False)
+    ):
+        return None
+    avar = base.get("avar")
+    segments = getattr(avar, "segments", None) if avar is not None else None
+    if not segments or getattr(avar, "majorVersion", 1) >= 2:
+        return None
+    seg = segments.get("wght")
+    return {"wght": dict(seg)} if seg else None
+
+
 def _condition_range(cond):
     """(axis_index, min, max) of a Format-1 FeatureVariations condition."""
     if getattr(cond, "Format", 1) != 1:
@@ -1207,10 +1235,9 @@ def _layout_rules(base, p, out_triple):
 def _wght_peaks(font):
     """Unique design-normalized wght master positions; always includes 0.
 
-    Masters come from gvar/HVAR/MVAR regions plus avar segment points: the
-    output axis is linear, so avar kinks are sampled as masters to reproduce
-    each source's non-linear weight curve. (Nested components are the
-    separate reason gvar can grow.)
+    Masters come from gvar/HVAR/MVAR regions only. avar is a normalization
+    curve, not a set of masters, and its segment points would multiply the
+    sampled masters (and the output gvar) many times over.
     """
     peaks = {0.0}
     gvar = font.get("gvar")
@@ -1236,11 +1263,6 @@ def _wght_peaks(font):
                     peak = getattr(axes[index], "Peak", None)
                 if peak is not None:
                     peaks.add(round(float(peak), 4))
-    avar = font.get("avar")
-    segments = getattr(avar, "segments", None) if avar is not None else None
-    if segments:
-        for value in segments.get("wght", {}).values():
-            peaks.add(round(float(value), 4))
     return sorted(peaks)
 
 
@@ -1329,36 +1351,40 @@ def _variable_plan(base, cjk, p):
     def cjk_for(mono_user):
         return min(cjk_axis[2], max(cjk_axis[0], _apply_weight_map(anchors, mono_user)))
 
-    # masters keyed by mono user value; denser mono peaks win duplicates
+    # masters keyed by output-internal position; first writer wins so the
+    # denser mono peaks take precedence over CJK-mapped duplicates
     masters = {}
 
-    def add(mono_user, cjk_user):
-        key = round(min(out_max, max(out_min, mono_user)), 6)
-        masters.setdefault(key, cjk_user)
+    def add(internal, mono_user, cjk_user):
+        key = round(min(1.0, max(-1.0, internal)), 6)
+        masters.setdefault(key, (mono_user, cjk_user))
 
     for n in _wght_peaks(base):
         mono_user = _design_to_user(to_mono, n)
         if out_min - 1e-6 <= mono_user <= out_max + 1e-6:
-            add(mono_user, cjk_for(mono_user))
+            add(n, mono_user, cjk_for(mono_user))
     for n in _wght_peaks(cjk):
         cjk_user = _design_to_user(to_cjk, n)
         mono_user = _invert_weight_map(anchors, cjk_user)
-        if out_min - 1e-6 <= mono_user <= out_max + 1e-6:
-            add(mono_user, cjk_user)
-    # pin the narrowed endpoints: nothing extrapolates past them
-    add(out_min, cjk_for(out_min))
-    add(de, cjk_for(de))
-    add(out_max, cjk_for(out_max))
+        mono_user = min(out_max, max(out_min, mono_user))
+        add(_user_to_design(base, "wght", mono_user), mono_user, cjk_user)
+    # pin the output endpoints and default: nothing extrapolates past them
+    add(-1.0, out_min, cjk_for(out_min))
+    add(0.0, de, cjk_for(de))
+    add(1.0, out_max, cjk_for(out_max))
     items = sorted(masters.items())
     if len(items) > _MAX_VARIABLE_MASTERS:
         # pathological case: pin the default and the endpoints, thin the rest
-        pinned = sorted({items[0][0], de, items[-1][0]})
-        rest = [u for u, _ in items if u not in pinned]
+        pinned = [0.0, -1.0, 1.0]
+        rest = [internal for internal, _ in items if internal not in pinned]
         keep = _MAX_VARIABLE_MASTERS - len(pinned)
         idx = sorted({round(i * (len(rest) - 1) / (keep - 1)) for i in range(keep)})
         keys = sorted(set(pinned) | {rest[i] for i in idx})
         items = [(k, masters[k]) for k in keys]
-    locations = [{"mono": mono_user, "cjk": cjk_user} for mono_user, cjk_user in items]
+    locations = [
+        {"internal": internal, "mono": mono_user, "cjk": cjk_user}
+        for internal, (mono_user, cjk_user) in items
+    ]
     instances = _mono_instances(base, out_min, out_max)
     layout_rules = _layout_rules(base, p, out_triple)
     return {
@@ -1366,6 +1392,7 @@ def _variable_plan(base, cjk, p):
         "locations": locations,
         "instances": instances,
         "layout_rules": layout_rules,
+        "avar": _avar_segments(base, out_triple),
     }, []
 
 
@@ -1390,9 +1417,11 @@ def _master_params(params, mono_wght, cjk_wght, ignore_mono_outline):
 def _build_variable(masters, plan):
     """Rebuild a wght variable font from static merged masters.
 
-    masters = [(mono_user_value, TTFont), ...]. The output axis is linear over
-    the mono range; each source's non-linear weight curve is reproduced by
-    sampling its avar kinks as masters (_wght_peaks), not by an avar table.
+    masters = [(output_internal_position, TTFont), ...]. Sources are placed
+    so varLib's linear normalization puts them at those internal positions
+    (the mono design-normalized space); the mono base's avar is then carried
+    into the output so users reach those positions exactly as in the base.
+    The CJK curve follows the base avar, aligned through weight-map anchors.
     """
     from fontTools import varLib
     from fontTools.designspaceLib import (
@@ -1400,6 +1429,7 @@ def _build_variable(masters, plan):
         DesignSpaceDocument,
         SourceDescriptor,
     )
+    from fontTools.ttLib import newTable
     from fontTools.ttLib.tables._f_v_a_r import NamedInstance
 
     axis = plan["axis"]
@@ -1409,13 +1439,13 @@ def _build_variable(masters, plan):
     ax.tag = "wght"
     ax.minimum, ax.default, ax.maximum = axis
     doc.addAxis(ax)
-    for mono_wght, font in masters:
+    for internal, font in masters:
         src = SourceDescriptor()
-        src.name = f"master.{mono_wght:g}"
-        src.location = {"weight": mono_wght}
+        src.name = f"master.{internal:g}"
+        src.location = {"weight": _denormalize_linear(internal, axis)}
         src.font = font
         doc.addSource(src)
-    base = min(masters, key=lambda m: abs(m[0] - axis[1]))[1]
+    base = min(masters, key=lambda m: abs(m[0]))[1]
     # Layout tables are kept from the mono base and identical across masters;
     # restore the default master's copy instead of merging them per master
     # (varLib.build deletes excluded tables from the output).
@@ -1430,6 +1460,11 @@ def _build_variable(masters, plan):
     for tag, table in saved.items():
         if tag not in vf:
             vf[tag] = table
+    segments = plan.get("avar")
+    if segments:
+        avar = newTable("avar")
+        avar.segments = {tag: dict(points) for tag, points in segments.items()}
+        vf["avar"] = avar
     seen = set()
     name_table = vf["name"]
     used_ids = {rec.nameID for rec in name_table.names}
@@ -1598,12 +1633,12 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
             ):
                 del inner.FeatureVariations
                 inner.Version = 0x00010000
-        masters.append((loc["mono"], merged))
+        masters.append((loc["internal"], merged))
         if meta.get("ymin") is not None:
             ymin_all = meta["ymin"] if ymin_all is None else min(ymin_all, meta["ymin"])
         if meta.get("ymax") is not None:
             ymax_all = meta["ymax"] if ymax_all is None else max(ymax_all, meta["ymax"])
-        if master_meta is None or abs(loc["mono"] - plan["axis"][1]) < 1e-6:
+        if master_meta is None or abs(loc["internal"]) < 1e-6:
             master_meta = meta
     report("masters", 100)
     report("varlib")
