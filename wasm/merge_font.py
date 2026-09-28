@@ -781,8 +781,10 @@ def _scan_glyf(glyf):
         g = glyf[name]
         g.expand(glyf)
         if hasattr(g, "coordinates") and len(g.coordinates):
-            ys = [y for _, y in g.coordinates]
-            return min(ys), max(ys)
+            # calcBounds slices the backing array at C speed; the equivalent
+            # Python loop over coordinates is this function's hot path
+            _, lo, _, hi = g.coordinates.calcBounds()
+            return lo, hi
         if all(hasattr(g, attr) for attr in ("yMin", "yMax")):
             return g.yMin, g.yMax
         return None
