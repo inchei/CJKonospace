@@ -137,7 +137,8 @@ Unzip anywhere and run with no arguments (fonts and parameters are bundled):
 
     uv run build.py
 
-Dependencies (fontTools) are declared inline, so no manual install is needed.
+Dependencies (fontTools, brotli and numpy) are declared inline, so no manual
+install is needed. numpy only feeds the accelerated glyf decode path.
 
 The merge parameters chosen in the app are embedded as PARAMS below; edit
 them freely. To merge different fonts, point MONO_FILE/CJK_FILE at them.

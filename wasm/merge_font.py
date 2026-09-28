@@ -1,12 +1,15 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["fonttools", "brotli"]
+# dependencies = ["fonttools", "brotli", "numpy"]
 # ///
 """Merge a monospace font (base) with a CJK font.
 
 Mono is the base font so its GSUB/GPOS/GDEF and glyph IDs stay intact; scaled
 CJK glyphs are appended at the end of the glyph order and exposed through cmap.
-fontTools only, no numpy -- runs inside pyodide (see src/exporter.ts).
+
+fontTools only. numpy is optional: when importable it accelerates the per-glyph
+glyf decode/scale step (local CLI and the exported build.py); inside pyodide
+(see src/exporter.ts) numpy is not loaded, so the pure-Python fallback runs.
 
 Pass "mergeWght": true in params to merge the shared wght axis instead of
 pinning both fonts to a static instance: both inputs must be variable
@@ -23,9 +26,11 @@ CLI:
     python merge_font.py mono.ttf cjk.ttf out.ttf params.json
 """
 
+import array
 import copy
 import json
 import re
+import struct
 import sys
 from math import ceil
 from types import SimpleNamespace
@@ -36,7 +41,12 @@ from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont
-from fontTools.ttLib.tables._g_l_y_f import Glyph
+from fontTools.ttLib.tables._g_l_y_f import Glyph, GlyphCoordinates
+
+try:  # optional; absent in the pyodide worker, present for local builds
+    import numpy as _numpy
+except ImportError:
+    _numpy = None
 
 # Style-name keywords -> OS/2 usWeightClass. Compound forms first so
 # "ExtraBold"/"SemiBold" are not matched as "Bold".
@@ -207,6 +217,131 @@ def _to_glyf(font, upem):
     font.sfntVersion = "\x00\x01\x00\x00"
 
 
+def _numpy_flags(np, buf, pos, npts):
+    """Expand a glyf flag run-length stream at C speed.
+
+    Returns (flags, next_pos) or None when the stream doesn't decode to npts
+    points. A byte is a repeat-flag when bit 3 is set, and the byte right after
+    a repeat-flag (not itself a flag) is its count. fontTools walks this
+    per run; the run-length structure lets us compute every count position at
+    once: position i is a count byte exactly when the number of consecutive
+    repeat-flag bytes ending at i-1 is odd. Validated byte-for-byte against
+    Glyph.decompileCoordinates on a 31k-glyph CJK font.
+    """
+    raw = buf[pos : pos + npts]
+    m = raw.shape[0]
+    repeat = (raw & 8) != 0
+    lengths = np.zeros(m, dtype=np.int64)
+    idx = np.nonzero(repeat)[0]
+    if idx.size:
+        breaks = np.diff(idx) > 1  # gaps between consecutive runs
+        run_starts = np.concatenate(([0], np.nonzero(breaks)[0] + 1))
+        run_ends = np.concatenate((np.nonzero(breaks)[0], [idx.size - 1]))
+        run_len = run_ends - run_starts + 1
+        run_start = np.concatenate(([0], np.cumsum(run_len)[:-1]))
+        lengths[idx] = np.arange(idx.size) - np.repeat(run_start, run_len) + 1
+    is_count = np.zeros(m, dtype=bool)
+    is_count[1:] = (lengths[:-1] & 1) == 1
+    flag_pos = np.nonzero(~is_count)[0]
+    values = raw[flag_pos]
+    flags_are_repeat = repeat[flag_pos]
+    counts = np.ones(flag_pos.size, dtype=np.int64)
+    if flags_are_repeat.any():
+        at = flag_pos[flags_are_repeat] + 1
+        inside = at < m
+        decoded = np.ones(at.size, dtype=np.int64)
+        decoded[inside] = raw[at[inside]].astype(np.int64) + 1
+        counts[flags_are_repeat] = decoded
+    cumulative = np.cumsum(counts)
+    used = int(np.searchsorted(cumulative, npts, side="left")) + 1
+    if used > flag_pos.size or cumulative[used - 1] != npts:
+        return None
+    consumed = int((1 + flags_are_repeat[:used]).sum())
+    return np.repeat(values[:used], counts[:used]), pos + consumed
+
+
+def _numpy_deltas(np, buf, flags, pos, short_bit, same_bit):
+    """Decode one coordinate delta stream (x or y) at C speed.
+
+    `short_bit`/`same_bit` select the flag bits for this axis. Returns the
+    per-point delta array and the stream's end offset. Mirrors the per-flag
+    sign handling in Glyph.decompileCoordinates: a short delta is unsigned with
+    the sign taken from the "same" bit, a long one is a signed big-endian int16.
+    The buffer is read with a one-point gather (at/at+1) rather than boolean
+    indexing, which is much cheaper for the ~200-point glyphs CJK fonts have.
+    """
+    short = (flags & short_bit) != 0
+    same = (flags & same_bit) != 0
+    size = np.where(short, 1, np.where(same, 0, 2))
+    offset = np.empty(flags.shape[0], dtype=np.int64)
+    offset[0] = 0
+    np.cumsum(size[:-1], out=offset[1:])
+    at = pos + offset
+    hi = buf[at].astype(np.int64)
+    lo = buf[at + 1].astype(np.int64)
+    long_value = (hi << 8) | lo
+    long_value = np.where(long_value >= 0x8000, long_value - 0x10000, long_value)
+    value = np.where(short, np.where(same, hi, -hi), np.where(same, 0, long_value))
+    return value, pos + int(size.sum())
+
+
+def _numpy_move_simple(data, ncont, sx, sy, dx, dy):
+    """Vectorized decode + scale/translate of one simple glyf glyph.
+
+    Mirrors Glyph.decompileCoordinates + GlyphCoordinates.relativeToAbsolute,
+    replacing the per-point Python loop with numpy array ops. Returns a filled
+    Glyph, or None so the caller can fall back to the pure-Python path. Only
+    reached when numpy is importable (local CLI / exported build.py).
+    """
+    np = _numpy
+    from fontTools.ttLib.tables import ttProgram
+
+    end_pts = np.frombuffer(data, dtype=">u2", count=ncont, offset=10)
+    npts = int(end_pts[-1]) + 1
+    pos = 10 + 2 * ncont
+    (instruction_length,) = struct.unpack_from(">h", data, pos)
+    if instruction_length < 0:
+        return None
+    pos += 2
+    program = ttProgram.Program()
+    program.fromBytecode(data[pos : pos + instruction_length])
+    pos += instruction_length
+
+    # pad so the flag stream candidate and the delta look-ahead reads always
+    # have bytes available past `pos` (the real streams sit at the data tail)
+    buf = np.frombuffer(data + b"\x00" * 512, dtype=np.uint8)
+    expanded = _numpy_flags(np, buf, pos, npts)
+    if expanded is None:  # malformed; let fontTools report it
+        return None
+    flags, pos = expanded
+
+    xd, pos = _numpy_deltas(np, buf, flags, pos, 2, 16)
+    yd, _ = _numpy_deltas(np, buf, flags, pos, 4, 32)
+    xs = np.cumsum(xd)
+    ys = np.cumsum(yd)
+    tx = xs * sx + dx
+    ty = ys * sy + dy
+
+    coords = GlyphCoordinates.zeros(npts)
+    flat = np.empty(2 * npts, dtype=np.float64)
+    flat[0::2] = tx
+    flat[1::2] = ty
+    coords._a = array.array("d")
+    coords._a.frombytes(flat.tobytes())
+
+    new = Glyph()
+    new.numberOfContours = ncont
+    new.endPtsOfContours = end_pts.tolist()
+    new.program = program
+    new.flags = bytearray((flags & 193).tobytes())  # keepFlags
+    new.coordinates = coords
+    new.xMin = otRound(tx.min())
+    new.yMin = otRound(ty.min())
+    new.xMax = otRound(tx.max())
+    new.yMax = otRound(ty.max())
+    return new
+
+
 def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
     """Build a transformed copy of a glyf glyph.
 
@@ -216,6 +351,17 @@ def _move_glyf_glyph(src_glyf, name, sx, sy, dx, dy):
     translate are done in a single pass. Returns None for composites, which the
     caller redraws with a pen.
     """
+    # Simple glyphs still holding their raw glyf bytes go through the numpy
+    # decoder without ever expanding them; composites and already-expanded
+    # glyphs (e.g. instanced variable sources) use the pure-Python path below.
+    raw = src_glyf.glyphs.get(name)
+    data = getattr(raw, "data", None) if raw is not None else None
+    if _numpy is not None and data and len(data) >= 12:
+        ncont = int.from_bytes(data[:2], "big", signed=True)
+        if ncont > 0 and len(data) >= 12 + 2 * ncont:
+            moved = _numpy_move_simple(data, ncont, sx, sy, dx, dy)
+            if moved is not None:
+                return moved
     g = src_glyf[name]
     g.expand(src_glyf)
     if g.isComposite():
