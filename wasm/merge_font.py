@@ -1805,12 +1805,21 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
     base = TTFont(mono_path, fontNumber=p.mono_ttc_index)
     cjk = TTFont(cjk_path, fontNumber=p.cjk_ttc_index)
     plan, warnings = _variable_plan(base, cjk, p)
-    del base, cjk  # reloaded fresh per master below
     if plan is None:
+        del base, cjk
         merged, meta = _merge_to_font(mono_path, cjk_path, params, _quiet)
         meta["variable"] = False
         meta["warnings"] = warnings
         return merged, meta
+    # Subset once and hand every master its own deep copy: the subsetter (and a
+    # save/reload round-trip) costs several seconds per run, while copying the
+    # already-subset font is cheap and keeps its glyphs lazy. The cached copy is
+    # consumed by the instancer, hence the per-master copy.
+    subset_font = None
+    if p.subset_unicodes:
+        _subset_cjk(cjk, p, report)
+        subset_font = cjk
+    del base, cjk  # reloaded fresh per master below
     # mono outline transforms redraw per master through cu2qu (not
     # variation-aware) and would break point compatibility: ignore them.
     # Advance multipliers stay variable through HVAR.
@@ -1824,7 +1833,8 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
     for i, loc in enumerate(plan["locations"]):
         report("masters", int(i * 100 / total))
         mp = _master_params(params, loc["mono"], loc["cjk"], ignore_outline)
-        merged, meta = _merge_to_font(mono_path, cjk_path, mp, _quiet)
+        master_cjk = copy.deepcopy(subset_font) if subset_font is not None else None
+        merged, meta = _merge_to_font(mono_path, cjk_path, mp, _quiet, master_cjk)
         if "STAT" in merged:
             # drop the inherited STAT so varLib builds a fresh one
             del merged["STAT"]
@@ -1876,16 +1886,24 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
     return out, meta
 
 
-def _merge_to_font(mono_path, cjk_path, params, report):
-    """Run the static merge pipeline; returns (font, meta) without saving."""
+def _merge_to_font(mono_path, cjk_path, params, report, cjk_font=None):
+    """Run the static merge pipeline; returns (font, meta) without saving.
+
+    `cjk_font` hands in an already-loaded CJK font (used by the variable merge,
+    which subsets once and deep-copies it per master); when given, cjk_path is
+    ignored and no subsetting is applied here.
+    """
     p = _read_params(params)
 
     report("load")
     # ttcIndex picks a face when the input is a TrueType Collection (ignored otherwise)
     base = TTFont(mono_path, fontNumber=p.mono_ttc_index)
-    cjk = TTFont(cjk_path, fontNumber=p.cjk_ttc_index)
-
-    subset_kept = _subset_cjk(cjk, p, report)
+    if cjk_font is None:
+        cjk = TTFont(cjk_path, fontNumber=p.cjk_ttc_index)
+        subset_kept = _subset_cjk(cjk, p, report)
+    else:
+        cjk = cjk_font
+        subset_kept = None
     _instance_variable_fonts(base, cjk, p, report)
 
     upem = base["head"].unitsPerEm
