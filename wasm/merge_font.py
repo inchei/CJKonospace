@@ -450,6 +450,67 @@ def _finalize_composites(
     return list(dropped.values())
 
 
+def _composite_depth(glyph, glyf, seen):
+    """Nesting depth of a composite (0 for simple glyphs, 1 for flat ones)."""
+    if not glyph.isComposite():
+        return 0
+    depth = 0
+    for comp in glyph.components:
+        if comp.glyphName in seen or comp.glyphName not in glyf.glyphs:
+            continue
+        child = glyf[comp.glyphName]
+        child.expand(glyf)
+        depth = max(depth, 1 + _composite_depth(child, glyf, seen | {comp.glyphName}))
+    return depth
+
+
+def _decompose_nested_composites(base):
+    """Flatten composites whose components are themselves composites.
+
+    Nested components have known rendering and printing bugs, and variable
+    fonts make them worse (the Windows rasterizer is the strictest here).
+    Decomposition keeps the point structure identical across masters because
+    the component set is shared, so the rebuilt gvar stays compatible.
+    Returns the number of glyphs decomposed.
+    """
+    glyf = base.get("glyf")
+    if glyf is None:
+        return 0
+    from fontTools.pens.recordingPen import DecomposingRecordingPen
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    nested = []
+    for name in base.getGlyphOrder():
+        glyph = glyf[name]
+        glyph.expand(glyf)
+        if glyph.isComposite() and _composite_depth(glyph, glyf, {name}) > 1:
+            nested.append(name)
+    if not nested:
+        return 0
+    hmtx = base.get("hmtx")
+    glyph_set = base.getGlyphSet()
+    for name in nested:
+        glyph = glyf[name]
+        glyph.expand(glyf)
+        # glyphSet.draw shifts the top-level glyph by (lsb - xMin); undo it
+        offset = (hmtx[name][1] - glyph.xMin) if hmtx is not None else 0
+        recorder = DecomposingRecordingPen(glyph_set)
+        glyph_set[name].draw(recorder)
+        pen = TTGlyphPen(None)
+        recorder.replay(pen)
+        new = pen.glyph()
+        if offset:
+            coords = new.coordinates
+            for i in range(len(coords)):
+                x, y = coords[i]
+                coords[i] = (x - offset, y)
+        new.recalcBounds(glyf)
+        glyf[name] = new
+        if hmtx is not None:
+            hmtx[name] = (hmtx[name][0], getattr(new, "xMin", 0))
+    return len(nested)
+
+
 def _append_cjk(
     base,
     cjk,
@@ -631,34 +692,23 @@ def _synthesize_names(base, cjk, p):
         (22, style),  # WWS subfamily
     ):
         nt.setName(val, nid, 3, 1, 0x409)
-        try:
-            val.encode("mac_roman")
-        except UnicodeEncodeError:
-            # Mac Roman cannot represent this text (e.g. CJK names); drop
-            # any stale Mac record so it cannot contradict the Windows one
-            nt.names = [
-                rec
-                for rec in nt.names
-                if not (
-                    rec.nameID == nid
-                    and (rec.platformID, rec.platEncID, rec.langID) == (1, 0, 0)
-                )
-            ]
-        else:
-            nt.setName(val, nid, 1, 0, 0)
-    # drop records that are stale or meaningless in the merged output:
-    # reserved (15), Mac-only legacy names (18), the mono font's sample text
-    # (19) and CID findfont name (20, the output is never CID-keyed), color
-    # palettes (23, 24, no COLR table is carried over), and the variable-font
-    # PostScript prefix (25, inherited prefixes name the wrong family)
+    # drop records that are stale or meaningless in the merged output, plus
+    # every Macintosh-platform record: modern Windows/macOS read the Windows
+    # records, and Mac strings are Pascal-length-limited (255 bytes) so long
+    # licenses/copyrights would be malformed. reserved (15), Mac-only legacy
+    # names (18), the mono font's sample text (19), the CID findfont name
+    # (20, the output is never CID-keyed), color palettes (23, 24, no COLR
+    # table is carried over), and the variable-font PostScript prefix (25,
+    # inherited prefixes name the wrong family)
     drop_ids = {15, 18, 19, 20, 23, 24, 25}
     nt.names = [
         rec
         for rec in nt.names
         if rec.nameID not in drop_ids
+        and rec.platformID != 1
         and (
             rec.nameID not in managed
-            or (rec.platformID, rec.platEncID, rec.langID) in ((3, 1, 0x409), (1, 0, 0))
+            or (rec.platformID, rec.platEncID, rec.langID) == (3, 1, 0x409)
         )
     ]
     if "head" in base:
@@ -1155,7 +1205,13 @@ def _layout_rules(base, p, out_triple):
 
 
 def _wght_peaks(font):
-    """Unique design-normalized wght master positions; always includes 0."""
+    """Unique design-normalized wght master positions; always includes 0.
+
+    Masters come from gvar/HVAR/MVAR regions plus avar segment points: the
+    output axis is linear, so avar kinks are sampled as masters to reproduce
+    each source's non-linear weight curve. (Nested components are the
+    separate reason gvar can grow.)
+    """
     peaks = {0.0}
     gvar = font.get("gvar")
     if gvar is not None:
@@ -1233,10 +1289,13 @@ def _invert_weight_map(anchors, cjk_value):
 def _variable_plan(base, cjk, p):
     """Plan a wght merge: (plan, warnings), plan None on static fallback.
 
-    plan = {"axis": (min, default, max) mono user values, "locations":
-    [(mono_user, cjk_user), ...] sorted by mono}. Both fonts are instanced
-    at their own user values for every master; the CJK values come from the
-    weight-map anchors so uneven ranges/speeds stay aligned.
+    plan = {"axis": output user triple, "locations": [{"internal", "mono",
+    "cjk"}, ...], "instances": [...], "layout_rules": {...}, "avar": ...}.
+
+    Masters are keyed by their output-internal (mono design-normalized)
+    position. The mono base keeps its own avar curve (carried into the
+    output, so few masters reproduce it exactly); CJK masters are placed via
+    the weight-map anchors so uneven ranges/speeds stay aligned.
     """
     for font in (base, cjk):
         if "fvar" not in font or _fvar_axis(font, "wght") is None:
@@ -1254,11 +1313,6 @@ def _variable_plan(base, cjk, p):
     ]
     to_mono = _design_to_user_table(base, "wght")
     to_cjk = _design_to_user_table(cjk, "wght")
-    values = set()
-    for n in _wght_peaks(base):
-        values.add(round(_design_to_user(to_mono, n), 3))
-    for n in _wght_peaks(cjk):
-        values.add(round(_invert_weight_map(anchors, _design_to_user(to_cjk, n)), 3))
     lo, de, hi = mono_axis
     # narrowed output range (e.g. drop mono's thin end when the CJK minimum
     # looks heavier); invalid overrides fall back to the full mono range
@@ -1270,27 +1324,45 @@ def _variable_plan(base, cjk, p):
         out_min, out_max = lo, hi
     if not (lo <= out_min < de < out_max <= hi):
         out_min, out_max = lo, hi
-    values = sorted(v for v in values if out_min - 1e-6 <= v <= out_max + 1e-6)
-    values = [min(out_max, max(out_min, v)) for v in values]
-    # pin the narrowed endpoints as masters: without them the output would
-    # extrapolate below/above the lowest/highest sampled master
-    values = sorted(set(values) | {out_min, out_max})
-    if len(values) > _MAX_VARIABLE_MASTERS:
-        # pathological case: pin the endpoints and the default (the
-        # interpolation base), then thin out the rest evenly
-        pinned = sorted({values[0], de, values[-1]})
-        rest = [v for v in values if v not in pinned]
+    out_triple = (out_min, de, out_max)
+
+    def cjk_for(mono_user):
+        return min(cjk_axis[2], max(cjk_axis[0], _apply_weight_map(anchors, mono_user)))
+
+    # masters keyed by mono user value; denser mono peaks win duplicates
+    masters = {}
+
+    def add(mono_user, cjk_user):
+        key = round(min(out_max, max(out_min, mono_user)), 6)
+        masters.setdefault(key, cjk_user)
+
+    for n in _wght_peaks(base):
+        mono_user = _design_to_user(to_mono, n)
+        if out_min - 1e-6 <= mono_user <= out_max + 1e-6:
+            add(mono_user, cjk_for(mono_user))
+    for n in _wght_peaks(cjk):
+        cjk_user = _design_to_user(to_cjk, n)
+        mono_user = _invert_weight_map(anchors, cjk_user)
+        if out_min - 1e-6 <= mono_user <= out_max + 1e-6:
+            add(mono_user, cjk_user)
+    # pin the narrowed endpoints: nothing extrapolates past them
+    add(out_min, cjk_for(out_min))
+    add(de, cjk_for(de))
+    add(out_max, cjk_for(out_max))
+    items = sorted(masters.items())
+    if len(items) > _MAX_VARIABLE_MASTERS:
+        # pathological case: pin the default and the endpoints, thin the rest
+        pinned = sorted({items[0][0], de, items[-1][0]})
+        rest = [u for u, _ in items if u not in pinned]
         keep = _MAX_VARIABLE_MASTERS - len(pinned)
         idx = sorted({round(i * (len(rest) - 1) / (keep - 1)) for i in range(keep)})
-        values = sorted(pinned + [rest[i] for i in idx])
-    locations = [
-        (m, min(cjk_axis[2], max(cjk_axis[0], _apply_weight_map(anchors, m))))
-        for m in values
-    ]
+        keys = sorted(set(pinned) | {rest[i] for i in idx})
+        items = [(k, masters[k]) for k in keys]
+    locations = [{"mono": mono_user, "cjk": cjk_user} for mono_user, cjk_user in items]
     instances = _mono_instances(base, out_min, out_max)
-    layout_rules = _layout_rules(base, p, (out_min, de, out_max))
+    layout_rules = _layout_rules(base, p, out_triple)
     return {
-        "axis": (out_min, de, out_max),
+        "axis": out_triple,
         "locations": locations,
         "instances": instances,
         "layout_rules": layout_rules,
@@ -1318,10 +1390,9 @@ def _master_params(params, mono_wght, cjk_wght, ignore_mono_outline):
 def _build_variable(masters, plan):
     """Rebuild a wght variable font from static merged masters.
 
-    masters = [(mono_user_value, TTFont), ...]; plan carries the mono user
-    axis triple and the named instances to keep. The output axis is linear
-    over the mono range (source avar bends are approximated by the dense
-    master sampling).
+    masters = [(mono_user_value, TTFont), ...]. The output axis is linear over
+    the mono range; each source's non-linear weight curve is reproduced by
+    sampling its avar kinks as masters (_wght_peaks), not by an avar table.
     """
     from fontTools import varLib
     from fontTools.designspaceLib import (
@@ -1360,40 +1431,128 @@ def _build_variable(masters, plan):
         if tag not in vf:
             vf[tag] = table
     seen = set()
+    name_table = vf["name"]
+    used_ids = {rec.nameID for rec in name_table.names}
+    family_ps = re.sub(r"[^A-Za-z0-9]", "", _name_string(vf, 1) or "Font") or "Font"
+
+    def alloc_id():
+        candidate = 256
+        while candidate in used_ids:
+            candidate += 1
+        used_ids.add(candidate)
+        return candidate
+
+    def add_instance(wght, label):
+        subfamily_id = alloc_id()
+        name_table.setName(label, subfamily_id, 3, 1, 0x409)
+        if abs(wght - axis[1]) < 1e-6:
+            # the default instance must reuse the font's PostScript name
+            ps_name = _name_string(vf, 6) or family_ps
+            ps_id = next(
+                (
+                    rec.nameID
+                    for rec in name_table.names
+                    if rec.nameID == 6 and rec.platformID == 3
+                ),
+                None,
+            )
+            if ps_id is None:
+                ps_id = alloc_id()
+                name_table.setName(ps_name, ps_id, 3, 1, 0x409)
+        else:
+            ps_label = re.sub(r"[^A-Za-z0-9]", "", label) or "Regular"
+            ps_id = alloc_id()
+            name_table.setName(f"{family_ps}-{ps_label}"[:63], ps_id, 3, 1, 0x409)
+        inst = NamedInstance()
+        inst.subfamilyNameID = subfamily_id
+        inst.postscriptNameID = ps_id
+        inst.coordinates = {"wght": wght}
+        vf["fvar"].instances.append(inst)
+
+    pending = []
     if (_name_string(base, 17) or "").lower() == "regular":
         # every shipping variable font names its default instance: Windows
         # style matching/preview leans on it, and an instance-less fvar is
         # the most exotic shape for older Windows code paths
-        regular = NamedInstance()
-        regular.subfamilyNameID = 17
-        regular.postscriptNameID = 0xFFFF
-        regular.coordinates = {"wght": axis[1]}
-        vf["fvar"].instances.append(regular)
+        pending.append((axis[1], "Regular"))
         seen.add(("regular", round(axis[1], 3)))
-    name_table = vf["name"]
-    used_ids = {rec.nameID for rec in name_table.names}
     for wght, name in plan.get("instances", []):
         key = (name.lower(), round(wght, 3))
         if key in seen:
             continue
         seen.add(key)
-        subfamily_id = 256
-        while subfamily_id in used_ids:
-            subfamily_id += 1
-        used_ids.add(subfamily_id)
-        name_table.setName(name, subfamily_id, 3, 1, 0x409)
-        try:
-            name.encode("mac_roman")
-        except UnicodeEncodeError:
-            pass
-        else:
-            name_table.setName(name, subfamily_id, 1, 0, 0)
-        inst = NamedInstance()
-        inst.subfamilyNameID = subfamily_id
-        inst.postscriptNameID = 0xFFFF
-        inst.coordinates = {"wght": wght}
-        vf["fvar"].instances.append(inst)
+        pending.append((wght, name))
+    # fvar instances must be in ascending weight order for legacy consumers
+    for wght, label in sorted(pending, key=lambda p: p[0]):
+        add_instance(wght, label)
+    _add_stat_axis_values(vf, axis)
     return vf
+
+
+def _add_stat_axis_values(vf, axis):
+    """Give every fvar named instance a matching STAT AxisValue.
+
+    varLib's minimal STAT carries the wght axis but no values; once named
+    instances exist that is an fvar/STAT inconsistency (fontbakery fails it,
+    and apps that group styles via STAT may misbehave). One AxisValue per
+    distinct instance weight, named after the instance, ELIDABLE on the
+    default.
+    """
+    from fontTools.ttLib.tables import otTables as ot
+
+    stat_table = vf.get("STAT")
+    if stat_table is None:
+        return
+    stat = stat_table.table
+    axis_index = next(
+        (
+            i
+            for i, record in enumerate(stat.DesignAxisRecord.Axis)
+            if record.AxisTag == "wght"
+        ),
+        None,
+    )
+    if axis_index is None:
+        return
+    # STAT value name IDs must be 256..32767 (only the elided fallback may
+    # reuse a low ID). The default instance typically reuses name ID 17, so
+    # copy such labels onto fresh high IDs first.
+    name_table = vf.get("name")
+    used = {rec.nameID for rec in name_table.names} if name_table else set()
+
+    def high_name_id(name_id):
+        if name_id >= 256 or name_table is None:
+            return name_id
+        text = _instance_name(name_table, name_id)
+        if not text:
+            return name_id
+        new_id = 256
+        while new_id in used:
+            new_id += 1
+        used.add(new_id)
+        name_table.setName(text, new_id, 3, 1, 0x409)
+        return new_id
+
+    by_value = {}
+    for inst in vf["fvar"].instances:
+        value = inst.coordinates.get("wght")
+        if value is not None:
+            by_value.setdefault(round(value, 4), high_name_id(inst.subfamilyNameID))
+    values = []
+    for value, name_id in sorted(by_value.items()):
+        entry = ot.AxisValue()
+        entry.Format = 1
+        entry.AxisIndex = axis_index
+        entry.Flags = 0x2 if abs(value - axis[1]) < 1e-6 else 0  # ELIDABLE
+        entry.ValueNameID = name_id
+        entry.Value = value
+        values.append(entry)
+    if not values:
+        return
+    array = ot.AxisValueArray()
+    array.AxisValue = values
+    stat.AxisValueArray = array
+    stat.AxisValueCount = len(values)
 
 
 def _quiet(_stage, _value=None):
@@ -1421,9 +1580,9 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
     master_meta = None
     ymin_all = ymax_all = None
     total = len(plan["locations"])
-    for i, (mono_wght, cjk_wght) in enumerate(plan["locations"]):
+    for i, loc in enumerate(plan["locations"]):
         report("masters", int(i * 100 / total))
-        mp = _master_params(params, mono_wght, cjk_wght, ignore_outline)
+        mp = _master_params(params, loc["mono"], loc["cjk"], ignore_outline)
         merged, meta = _merge_to_font(mono_path, cjk_path, mp, _quiet)
         if "STAT" in merged:
             # drop the inherited STAT so varLib builds a fresh one
@@ -1439,12 +1598,12 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
             ):
                 del inner.FeatureVariations
                 inner.Version = 0x00010000
-        masters.append((mono_wght, merged))
+        masters.append((loc["mono"], merged))
         if meta.get("ymin") is not None:
             ymin_all = meta["ymin"] if ymin_all is None else min(ymin_all, meta["ymin"])
         if meta.get("ymax") is not None:
             ymax_all = meta["ymax"] if ymax_all is None else max(ymax_all, meta["ymax"])
-        if master_meta is None or mono_wght == plan["axis"][1]:
+        if master_meta is None or abs(loc["mono"] - plan["axis"][1]) < 1e-6:
             master_meta = meta
     report("masters", 100)
     report("varlib")
@@ -1517,6 +1676,7 @@ def _merge_to_font(mono_path, cjk_path, params, report):
     )
     _merge_cmap(base, base_cmap, added_cmap, report)
     _synthesize_names(base, cjk, p)
+    _decompose_nested_composites(base)
     mono = _update_metrics(base, p, mono_ref_adv, report)
     _sync_subfamily_style(base, p.style)
     ymin, ymax = _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
