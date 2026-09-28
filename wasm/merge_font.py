@@ -1520,8 +1520,31 @@ def _build_variable(masters, plan):
     # fvar instances must be in ascending weight order for legacy consumers
     for wght, label in sorted(pending, key=lambda p: p[0]):
         add_instance(wght, label)
+    _drop_degenerate_hvar(vf)
     _add_stat_axis_values(vf, axis)
     return vf
+
+
+def _drop_degenerate_hvar(vf):
+    """Remove a HVAR that carries no variation.
+
+    With no regions varLib writes a HVAR whose advance-width map is omitted
+    (AdvWidthMap=None; fontTools #3797), i.e. glyph IDs are used as implicit
+    delta-set indices, as the HVAR spec allows:
+    https://learn.microsoft.com/en-us/typography/opentype/spec/hvar
+    Windows resolves that implicit mapping with a signed 16-bit glyph index,
+    so any font with 32768+ glyphs reads out of bounds (unstable installs).
+    The spec only *recommends* the explicit advance-width map; our region-less
+    HVAR encodes nothing, so dropping it is loss-free (advances still vary
+    through gvar phantom points when they actually do).
+    """
+    hvar = vf.get("HVAR")
+    if hvar is None:
+        return
+    store = getattr(hvar.table, "VarStore", None)
+    regions = getattr(getattr(store, "VarRegionList", None), "RegionCount", 0)
+    if not regions:
+        del vf["HVAR"]
 
 
 def _add_stat_axis_values(vf, axis):
