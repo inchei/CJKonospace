@@ -216,47 +216,39 @@ def _to_glyf(font, upem):
     font.sfntVersion = "\x00\x01\x00\x00"
 
 
-def _numpy_flags(np, buf, pos, npts):
-    """Expand a glyf flag run-length stream at C speed.
+def _expand_flags(data, pos, npts):
+    """Expand a glyf flag run-length stream; (bytearray, next_pos) or None.
 
-    Returns (flags, next_pos) or None when the stream doesn't decode to npts
-    points. A byte is a repeat-flag when bit 3 is set, and the byte right after
-    a repeat-flag (not itself a flag) is its count. fontTools walks this
-    per run; the run-length structure lets us compute every count position at
-    once: position i is a count byte exactly when the number of consecutive
-    repeat-flag bytes ending at i-1 is odd. Validated byte-for-byte against
-    Glyph.decompileCoordinates on a 31k-glyph CJK font.
+    A byte is a repeat-flag when bit 3 is set, and the byte right after a
+    repeat-flag (not itself a flag) is its count: the flag then repeats
+    count + 1 times. Pure Python beats a vectorized decode here because the
+    stream is only ~npts bytes and CJK glyphs have a few hundred points, so
+    byte indexing plus slice assignment avoids NumPy's per-call dispatch
+    overhead. Validated byte-for-byte against Glyph.decompileCoordinates on a
+    31k-glyph CJK font. Returns None on a malformed stream.
     """
-    raw = buf[pos : pos + npts]
-    m = raw.shape[0]
-    repeat = (raw & 8) != 0
-    lengths = np.zeros(m, dtype=np.int64)
-    idx = np.nonzero(repeat)[0]
-    if idx.size:
-        breaks = np.diff(idx) > 1  # gaps between consecutive runs
-        run_starts = np.concatenate(([0], np.nonzero(breaks)[0] + 1))
-        run_ends = np.concatenate((np.nonzero(breaks)[0], [idx.size - 1]))
-        run_len = run_ends - run_starts + 1
-        run_start = np.concatenate(([0], np.cumsum(run_len)[:-1]))
-        lengths[idx] = np.arange(idx.size) - np.repeat(run_start, run_len) + 1
-    is_count = np.zeros(m, dtype=bool)
-    is_count[1:] = (lengths[:-1] & 1) == 1
-    flag_pos = np.nonzero(~is_count)[0]
-    values = raw[flag_pos]
-    flags_are_repeat = repeat[flag_pos]
-    counts = np.ones(flag_pos.size, dtype=np.int64)
-    if flags_are_repeat.any():
-        at = flag_pos[flags_are_repeat] + 1
-        inside = at < m
-        decoded = np.ones(at.size, dtype=np.int64)
-        decoded[inside] = raw[at[inside]].astype(np.int64) + 1
-        counts[flags_are_repeat] = decoded
-    cumulative = np.cumsum(counts)
-    used = int(np.searchsorted(cumulative, npts, side="left")) + 1
-    if used > flag_pos.size or cumulative[used - 1] != npts:
-        return None
-    consumed = int((1 + flags_are_repeat[:used]).sum())
-    return np.repeat(values[:used], counts[:used]), pos + consumed
+    out = bytearray(npts)
+    end = len(data)
+    i = 0
+    p = pos
+    while i < npts:
+        if p >= end:
+            return None
+        flag = data[p]
+        p += 1
+        out[i] = flag
+        i += 1
+        if flag & 8:  # flagRepeat
+            if p >= end:
+                return None
+            count = data[p]
+            p += 1
+            j = i + count
+            if j > npts:
+                return None
+            out[i:j] = bytes((flag,)) * count
+            i = j
+    return out, p
 
 
 def _numpy_deltas(np, buf, flags, pos, short_bit, same_bit):
@@ -332,13 +324,14 @@ def _numpy_move_simple(data, ncont, sx, sy, dx, dy):
     program.fromBytecode(data[pos : pos + instruction_length])
     pos += instruction_length
 
-    # pad so the flag stream candidate and the delta look-ahead reads always
-    # have bytes available past `pos` (the real streams sit at the data tail)
+    # pad so the delta look-ahead reads always have bytes available past `pos`
+    # (the real streams sit at the data tail)
     buf = np.frombuffer(data + b"\x00" * 512, dtype=np.uint8)
-    expanded = _numpy_flags(np, buf, pos, npts)
+    expanded = _expand_flags(data, pos, npts)
     if expanded is None:  # malformed; let fontTools report it
         return None
-    flags, pos = expanded
+    flag_bytes, pos = expanded
+    flags = np.frombuffer(flag_bytes, dtype=np.uint8)
 
     xd, pos = _numpy_deltas(np, buf, flags, pos, 2, 16)
     yd, _ = _numpy_deltas(np, buf, flags, pos, 4, 32)
