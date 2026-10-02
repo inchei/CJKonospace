@@ -29,6 +29,7 @@ CLI:
 import copy
 import io
 import json
+import os
 import re
 import struct
 import sys
@@ -1879,6 +1880,54 @@ def _quiet(_stage, _value=None):
     """Progress sink for the per-master merges (only masters/varlib report)."""
 
 
+def _prepare_master(font):
+    """Drop tables varLib rebuilds so a master can be passed to it as-is."""
+    if "STAT" in font:
+        # drop the inherited STAT so varLib builds a fresh one
+        del font["STAT"]
+    for tag in ("GSUB", "GPOS"):
+        # drop statically pruned FeatureVariations: the rules are rebuilt
+        # on the output axis below instead
+        table = font.get(tag)
+        inner = getattr(table, "table", None) if table is not None else None
+        if inner is not None and getattr(inner, "FeatureVariations", None) is not None:
+            del inner.FeatureVariations
+            inner.Version = 0x00010000
+    return font
+
+
+def _merge_master_worker(task):
+    """Build one variable master in a child process (fork pool target).
+
+    Returns (index, font, meta). The font is pickled back, so its fractional
+    coordinates survive untouched (a save/reload would round them and could
+    change the interpolated gvar).
+    """
+    index, mono_path, cjk_path, master_params, subset_blob = task
+    cjk_font = TTFont(io.BytesIO(subset_blob)) if subset_blob is not None else None
+    font, meta = _merge_to_font(mono_path, cjk_path, master_params, _quiet, cjk_font)
+    return index, _prepare_master(font), meta
+
+
+def _fork_context(procs):
+    """A fork pool context for local runs, or None (pyodide/Windows/opt-out).
+
+    pyodide (emscripten) has no usable multiprocessing; Windows defaults to
+    spawn, which cannot re-import the exec'd/sliced module. Only fork is used.
+    """
+    if procs < 2 or sys.platform == "emscripten":
+        return None
+    if os.environ.get("CJKONO_NO_MP"):
+        return None
+    try:
+        import multiprocessing
+    except ImportError:
+        return None
+    if "fork" not in multiprocessing.get_all_start_methods():
+        return None
+    return multiprocessing.get_context("fork")
+
+
 def _merge_variable(mono_path, cjk_path, params, p, report):
     """Merge into a variable font; fall back to the static pipeline."""
     base = TTFont(mono_path, fontNumber=p.mono_ttc_index)
@@ -1914,34 +1963,59 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
     ignore_outline = p.mono_gsx != 1 or p.mono_gsy != 1 or p.mono_bl != 0
     if ignore_outline:
         warnings.append(_WARN_MONO_OUTLINE_IGNORED)
+    locations = plan["locations"]
+    total = len(locations)
+    tasks = [
+        (
+            i,
+            mono_path,
+            cjk_path,
+            _master_params(params, loc["mono"], loc["cjk"], ignore_outline),
+            subset_blob if subset_blob is not None else None,
+        )
+        for i, loc in enumerate(locations)
+    ]
+    # Each master is independent and CPU-bound (instancing + append), so build
+    # them across processes when fork is available. Any failure falls back to
+    # the serial loop. subset_font is only kept for the non-serializable case.
+    by_index = {}
+    # A requested-but-unserializable subset would make every worker re-subset
+    # the whole CJK input, so keep that case serial.
+    can_parallel = len(tasks) >= 2 and (
+        not p.subset_unicodes or subset_blob is not None
+    )
+    ctx = _fork_context(len(tasks)) if can_parallel else None
+    if ctx is not None:
+        try:
+            procs = min(len(tasks), os.cpu_count() or 1)
+            with ctx.Pool(procs) as pool:
+                for done, (index, font, meta) in enumerate(
+                    pool.imap_unordered(_merge_master_worker, tasks, chunksize=1), 1
+                ):
+                    by_index[index] = (font, meta)
+                    report("masters", int(done * 100 / total))
+        except Exception:
+            by_index.clear()
+    if not by_index:
+        # serial path (also handles a missing/serialized-subset fallback)
+        for i, loc in enumerate(locations):
+            mp = _master_params(params, loc["mono"], loc["cjk"], ignore_outline)
+            if subset_blob is not None:
+                master_cjk = TTFont(io.BytesIO(subset_blob))
+            elif subset_font is not None:
+                master_cjk = copy.deepcopy(subset_font)
+            else:
+                master_cjk = None
+            font, meta = _merge_to_font(mono_path, cjk_path, mp, _quiet, master_cjk)
+            by_index[i] = (_prepare_master(font), meta)
+            report("masters", int((i + 1) * 100 / total))
+    report("masters", 100)
+
     masters = []
     master_meta = None
     ymin_all = ymax_all = None
-    total = len(plan["locations"])
-    for i, loc in enumerate(plan["locations"]):
-        report("masters", int(i * 100 / total))
-        mp = _master_params(params, loc["mono"], loc["cjk"], ignore_outline)
-        if subset_blob is not None:
-            master_cjk = TTFont(io.BytesIO(subset_blob))
-        elif subset_font is not None:
-            master_cjk = copy.deepcopy(subset_font)
-        else:
-            master_cjk = None
-        merged, meta = _merge_to_font(mono_path, cjk_path, mp, _quiet, master_cjk)
-        if "STAT" in merged:
-            # drop the inherited STAT so varLib builds a fresh one
-            del merged["STAT"]
-        for tag in ("GSUB", "GPOS"):
-            # drop statically pruned FeatureVariations: the rules are rebuilt
-            # on the output axis below instead
-            table = merged.get(tag)
-            inner = getattr(table, "table", None) if table is not None else None
-            if (
-                inner is not None
-                and getattr(inner, "FeatureVariations", None) is not None
-            ):
-                del inner.FeatureVariations
-                inner.Version = 0x00010000
+    for i, loc in enumerate(locations):
+        merged, meta = by_index[i]
         masters.append((loc["internal"], merged))
         if meta.get("ymin") is not None:
             ymin_all = meta["ymin"] if ymin_all is None else min(ymin_all, meta["ymin"])
@@ -1949,7 +2023,6 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
             ymax_all = meta["ymax"] if ymax_all is None else max(ymax_all, meta["ymax"])
         if master_meta is None or abs(loc["internal"]) < 1e-6:
             master_meta = meta
-    report("masters", 100)
     report("varlib")
     out = _build_variable(masters, plan)
     from fontTools.varLib.featureVars import addFeatureVariations
