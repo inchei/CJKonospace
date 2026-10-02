@@ -26,7 +26,6 @@ CLI:
     python merge_font.py mono.ttf cjk.ttf out.ttf params.json
 """
 
-import array
 import copy
 import json
 import re
@@ -285,6 +284,32 @@ def _numpy_deltas(np, buf, flags, pos, short_bit, same_bit):
     return value, pos + int(size.sum())
 
 
+class _NumpyGlyph(Glyph):
+    """Keep fractional outlines until save; vectorize only serialization prep."""
+
+    def compileCoordinates(self, *, optimizeSize=True):
+        if _numpy is None or not optimizeSize:
+            return super().compileCoordinates(optimizeSize=optimizeSize)
+        np = _numpy
+        coords = np.frombuffer(self.coordinates._a, dtype=np.float64)
+        # Keep fontTools' behavior for exceptional coordinates. The bounded
+        # range also makes the integer conversion and subtraction exact.
+        if not np.all(np.isfinite(coords)) or np.any(np.abs(coords) > 2**31):
+            return super().compileCoordinates(optimizeSize=optimizeSize)
+        assert len(self.coordinates) == len(self.flags)
+        rounded = np.floor(coords + 0.5).astype(np.int64).reshape(-1, 2)
+        rounded[1:] -= rounded[:-1].copy()
+        # Python ints avoid GlyphCoordinates.__getitem__ and its per-point
+        # float checks. Retain the original greedy encoder byte-for-byte.
+        deltas = zip(rounded[:, 0].tolist(), rounded[:, 1].tolist(), strict=True)
+        packed = self.compileDeltasGreedy(self.flags, deltas)
+        endpoints = np.asarray(self.endPtsOfContours, dtype=">u2").tobytes()
+        instructions = self.program.getBytecode()
+        return b"".join(
+            (endpoints, struct.pack(">h", len(instructions)), instructions, *packed)
+        )
+
+
 def _numpy_move_simple(data, ncont, sx, sy, dx, dy):
     """Vectorized decode + scale/translate of one simple glyf glyph.
 
@@ -322,14 +347,13 @@ def _numpy_move_simple(data, ncont, sx, sy, dx, dy):
     tx = xs * sx + dx
     ty = ys * sy + dy
 
-    coords = GlyphCoordinates.zeros(npts)
+    coords = GlyphCoordinates()
     flat = np.empty(2 * npts, dtype=np.float64)
     flat[0::2] = tx
     flat[1::2] = ty
-    coords._a = array.array("d")
-    coords._a.frombytes(flat.tobytes())
+    coords._a.frombytes(memoryview(flat).cast("B"))
 
-    new = Glyph()
+    new = _NumpyGlyph()
     new.numberOfContours = ncont
     new.endPtsOfContours = end_pts.tolist()
     new.program = program
@@ -354,17 +378,18 @@ def _numpy_move_loaded(g, sx, sy, dx, dy):
     flat = np.frombuffer(g.coordinates._a, dtype=np.float64).copy()
     if not flat.size:
         return None
-    flat[0::2] = flat[0::2] * sx + dx
-    flat[1::2] = flat[1::2] * sy + dy
-    new = Glyph()
+    flat[0::2] *= sx
+    flat[0::2] += dx
+    flat[1::2] *= sy
+    flat[1::2] += dy
+    new = _NumpyGlyph()
     new.numberOfContours = g.numberOfContours
     new.endPtsOfContours = list(g.endPtsOfContours)
     new.flags = list(g.flags)
     if hasattr(g, "program"):
         new.program = g.program
-    new.coordinates = GlyphCoordinates.zeros(flat.size // 2)
-    new.coordinates._a = array.array("d")
-    new.coordinates._a.frombytes(flat.tobytes())
+    new.coordinates = GlyphCoordinates()
+    new.coordinates._a.frombytes(memoryview(flat).cast("B"))
     new.xMin = otRound(flat[0::2].min())
     new.yMin = otRound(flat[1::2].min())
     new.xMax = otRound(flat[0::2].max())
