@@ -216,6 +216,10 @@ def _to_glyf(font, upem):
     font.sfntVersion = "\x00\x01\x00\x00"
 
 
+# Prebuilt one-byte strings for the flag-repeat slice assignment below.
+_FLAG_BYTE = [bytes((i,)) for i in range(256)]
+
+
 def _expand_flags(data, pos, npts):
     """Expand a glyf flag run-length stream; (bytearray, next_pos) or None.
 
@@ -246,7 +250,7 @@ def _expand_flags(data, pos, npts):
             j = i + count
             if j > npts:
                 return None
-            out[i:j] = bytes((flag,)) * count
+            out[i:j] = _FLAG_BYTE[flag] * count
             i = j
     return out, p
 
@@ -285,9 +289,13 @@ class _NumpyGlyph(Glyph):
         np = _numpy
         coords = np.frombuffer(self.coordinates._a, dtype=np.float64)
         # Keep fontTools' behavior for exceptional coordinates. The bounded
-        # range also makes the integer conversion and subtraction exact.
-        if not np.all(np.isfinite(coords)) or np.any(np.abs(coords) > 2**31):
-            return super().compileCoordinates(optimizeSize=optimizeSize)
+        # range also makes the integer conversion and subtraction exact. A
+        # single abs-max pass catches NaN/Inf (both propagate to the max) and
+        # out-of-range values, unlike the two-pass isfinite/abs check.
+        if coords.size:
+            bound = np.abs(coords).max()
+            if not np.isfinite(bound) or bound > 2**31:
+                return super().compileCoordinates(optimizeSize=optimizeSize)
         assert len(self.coordinates) == len(self.flags)
         rounded = np.floor(coords + 0.5).astype(np.int64).reshape(-1, 2)
         rounded[1:] -= rounded[:-1].copy()
@@ -300,6 +308,58 @@ class _NumpyGlyph(Glyph):
         return b"".join(
             (endpoints, struct.pack(">h", len(instructions)), instructions, *packed)
         )
+
+    def compileDeltasGreedy(self, flags, deltas):
+        """Greedy delta/flag packing with hot names bound locally.
+
+        Byte-for-byte identical to Glyph.compileDeltasGreedy; only avoids
+        repeated attribute lookups and the struct.pack call per long delta.
+        """
+        compressedFlags = bytearray()
+        compressedXs = bytearray()
+        compressedYs = bytearray()
+        appendFlag = compressedFlags.append
+        appendX = compressedXs.append
+        extendX = compressedXs.extend
+        appendY = compressedYs.append
+        extendY = compressedYs.extend
+        lastflag = None
+        repeat = 0
+        for flag, (x, y) in zip(flags, deltas, strict=False):
+            if x == 0:
+                flag |= 16  # flagXsame
+            elif -255 <= x <= 255:
+                flag |= 2  # flagXShort
+                if x > 0:
+                    flag |= 16
+                else:
+                    x = -x
+                appendX(x)
+            else:
+                extendX(x.to_bytes(2, "big", signed=True))
+            if y == 0:
+                flag |= 32  # flagYsame
+            elif -255 <= y <= 255:
+                flag |= 4  # flagYShort
+                if y > 0:
+                    flag |= 32
+                else:
+                    y = -y
+                appendY(y)
+            else:
+                extendY(y.to_bytes(2, "big", signed=True))
+            if flag == lastflag and repeat != 255:
+                repeat += 1
+                if repeat == 1:
+                    appendFlag(flag)
+                else:
+                    compressedFlags[-2] = flag | 8  # flagRepeat
+                    compressedFlags[-1] = repeat
+            else:
+                repeat = 0
+                appendFlag(flag)
+            lastflag = flag
+        return compressedFlags, compressedXs, compressedYs
 
 
 def _numpy_move_simple(data, ncont, sx, sy, dx, dy):
