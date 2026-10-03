@@ -110,6 +110,7 @@ const zhHant = {
     warnCffVariable: "要求合併 wght 軸，但可變輸入為 CFF 輪廓，已退回靜態輸出",
     warnMonoOutline:
       "合併 wght 軸時忽略 mono 字形縮放／基線偏移（會破壞主版相容性）",
+    styleNote: "留空跟隨 mono；若底字標記與名稱不符，生成時按名稱自動糾正",
     variableOut: "含 wght 軸的可變字體",
     stageMasters: "逐 weight 主版合併中…",
     stageVarlib: "重建可變字體中…",
@@ -246,6 +247,8 @@ void i18next
               "要求合并 wght 轴，但可变输入为 CFF 轮廓，已退回静态输出",
             warnMonoOutline:
               "合并 wght 轴时忽略 mono 字形缩放／基线偏移（会破坏母版兼容性）",
+            styleNote:
+              "留空跟随 mono；若底字标记与名称不符，生成时按名称自动纠正",
             variableOut: "含 wght 轴的可变字体",
             stageMasters: "逐 weight 母版合并中…",
             stageVarlib: "重建可变字体中…",
@@ -365,6 +368,8 @@ void i18next
               "wght 軸の統合が要求されましたが、可変入力が CFF アウトラインのため静的出力にフォールバックしました",
             warnMonoOutline:
               "wght 軸統合時は mono のグリフ拡縮／ベースラインオフセットを無視します（マスター互換性のため）",
+            styleNote:
+              "空欄で mono に追随。ビットと名前が不整合な場合、生成時に名前基準で自動修正します",
             variableOut: "wght 軸付き可変フォント",
             stageMasters: "weight マスターごとに結合中…",
             stageVarlib: "可変フォントを再構築中…",
@@ -480,6 +485,8 @@ void i18next
               "wght 축 병합이 요청됐지만 가변 입력이 CFF 윤곽선이라 정적 출력으로 폴백했습니다",
             warnMonoOutline:
               "wght 축 병합 시 mono 글리프 확대/축소·베이스라인 오프셋을 무시합니다(마스터 호환성 때문)",
+            styleNote:
+              "비워 두면 mono를 따릅니다. 비트와 이름이 불일치하면 생성 시 이름 기준으로 자동 수정합니다",
             variableOut: "wght 축 포함 가변 폰트",
             stageMasters: "weight 마스터별 병합 중…",
             stageVarlib: "가변 폰트 재구축 중…",

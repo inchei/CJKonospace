@@ -110,6 +110,8 @@ def _sync_subfamily_style(base, style):
     freely-typed subfamily; an empty or unrecognized name keeps the base
     values. Style-bit rules follow the OpenType name examples:
     https://learn.microsoft.com/en-us/typography/opentype/spec/namesmp
+
+    Returns True when any style value actually changed.
     """
     normalized = _normalize_style(style)
     weight = _weight_from_style(style)
@@ -118,17 +120,20 @@ def _sync_subfamily_style(base, style):
     oblique = bool(re.search(r"\boblique\b", normalized))
     # unset (empty) or unrecognized: keep the mono base's style metadata
     if weight is None and width is None and not italic and not oblique:
-        return
+        return False
 
     bold = weight is not None and weight >= 700
     regular = weight == 400 and not italic and not oblique
+    changed = False
 
     if "OS/2" in base:
         os2 = base["OS/2"]
-        if weight is not None:
+        if weight is not None and os2.usWeightClass != weight:
             os2.usWeightClass = weight
-        if width is not None:
+            changed = True
+        if width is not None and os2.usWidthClass != width:
             os2.usWidthClass = width
+            changed = True
         # only the bits the subfamily expresses; keep effect/TYPO/WWS bits
         selection = os2.fsSelection & ~((1 << 0) | (1 << 5) | (1 << 6) | (1 << 9))
         if italic or oblique:
@@ -139,7 +144,9 @@ def _sync_subfamily_style(base, style):
             selection |= 1 << 5
         if regular:
             selection |= 1 << 6
-        os2.fsSelection = selection
+        if selection != os2.fsSelection:
+            os2.fsSelection = selection
+            changed = True
 
     if "head" in base:
         head = base["head"]
@@ -156,7 +163,10 @@ def _sync_subfamily_style(base, style):
             mac_style |= 1 << 5
         elif width is not None and width > 5:
             mac_style |= 1 << 6
-        head.macStyle = mac_style
+        if mac_style != head.macStyle:
+            head.macStyle = mac_style
+            changed = True
+    return changed
 
 
 def _pen_glyph(src_glyph_set, name, sx, sy, dx, dy, upem, reverse=False):
@@ -1937,7 +1947,7 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
         del base, cjk
         merged, meta = _merge_to_font(mono_path, cjk_path, params, _quiet)
         meta["variable"] = False
-        meta["warnings"] = warnings
+        meta["warnings"] = [*warnings, *meta.get("warnings", [])]
         return merged, meta
     # Subset once and give every master a fresh font: the subsetter costs
     # several seconds per run, so it must not repeat. The instancer consumes
@@ -2047,7 +2057,8 @@ def _merge_variable(mono_path, cjk_path, params, p, report):
             os2.usWinDescent = max(os2.usWinDescent, ceil(-ymin_all))
     meta = dict(master_meta or {})
     meta["variable"] = True
-    meta["warnings"] = warnings
+    # Keep any per-master warnings alongside the plan warnings.
+    meta["warnings"] = [*warnings, *(master_meta or {}).get("warnings", [])]
     meta["masters"] = total
     return out, meta
 
@@ -2103,7 +2114,12 @@ def _merge_to_font(mono_path, cjk_path, params, report, cjk_font=None):
     _synthesize_names(base, cjk, p)
     _decompose_nested_composites(base)
     mono = _update_metrics(base, p, mono_ref_adv, report)
-    _sync_subfamily_style(base, p.style)
+    # Sync against the effective subfamily (what _synthesize_names just wrote):
+    # an unset styleName inherits the mono base's own subfamily, but a broken
+    # base (e.g. Italic names with Regular fsSelection/macStyle bits, which the
+    # OS then ignores for italic matching) must be corrected to match the name.
+    effective_style = _name_string(base, 17) or _name_string(base, 2) or "Regular"
+    _sync_subfamily_style(base, effective_style)
     ymin, ymax = _update_vertical_metrics(base, cjk, p, upem, cjk_scale, units_per_px)
     _ensure_gasp(base)
 
