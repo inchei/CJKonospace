@@ -19,7 +19,11 @@ import {
 import { renderPreview } from "@/preview";
 import { ensureShaping, shapeMonoRun } from "@/shaper";
 import { generateFont, type ExportProgress } from "@/exporter";
-import { buildStandaloneArchive, fontFileName } from "@/lib/mergeScript";
+import {
+  buildStandaloneArchive,
+  fontFileName,
+  outputFileStem,
+} from "@/lib/mergeScript";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
@@ -615,6 +619,12 @@ export default function App() {
     };
   }
 
+  /** Effective subfamily for output file names: the typed style, or the
+   *  mono base's own subfamily when unset (the backend inherits it too). */
+  function effectiveSubfamily() {
+    return advStyle.trim() || mono.font?.meta.styleName || "";
+  }
+
   /** Export an offline bundle (build.py + both fonts): unzip and `uv run build.py`. */
   async function handleExportBuild() {
     const monoFont = mono.font;
@@ -640,6 +650,7 @@ export default function App() {
         mono: pick(monoFont, mono.ttc),
         cjk: pick(cjkFont, cjk.ttc),
         params: buildMergePayload(),
+        subfamily: effectiveSubfamily(),
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -684,7 +695,7 @@ export default function App() {
       setGen({
         status: "done",
         url,
-        fileName: `${family}.${format}`,
+        fileName: `${outputFileStem(family, effectiveSubfamily())}.${format}`,
         added: meta.added,
         format,
         // the backend is the source of truth (it may fall back to static)
