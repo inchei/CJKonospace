@@ -1,5 +1,13 @@
 <p align="center"><img src="public/logo.svg" width="128" height="128" alt="CJKonospace"></p>
 
+<p align="center">
+  <a href="README.md">English</a> |
+  <a href="README.zh-Hant.md">繁體中文</a> |
+  <a href="README.zh-Hans.md">简体中文</a> |
+  <a href="README.ja.md">日本語</a> |
+  <a href="README.ko.md">한국어</a>
+</p>
+
 # CJKonospace
 
 A CJK × Monospace blending workbench: feed in two fonts (one for CJK, one for monospace), preview them mixed live in the browser, and tune character width vs. glyph width until CJK : mono hits a visually balanced 1 : 2 ratio (Maple Mono style).
