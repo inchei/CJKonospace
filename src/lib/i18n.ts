@@ -3,8 +3,8 @@ import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 
 export const LANGS = [
-  { code: "zh-Hant", label: "繁體中文" },
   { code: "zh-Hans", label: "简体中文" },
+  { code: "zh-Hant", label: "繁體中文" },
   { code: "ja", label: "日本語" },
   { code: "ko", label: "한국어" },
 ];
@@ -125,7 +125,7 @@ void i18next
   .use(LanguageDetector)
   .use(initReactI18next)
   .init({
-    fallbackLng: "zh-Hant",
+    fallbackLng: "zh-Hans",
     supportedLngs: ["zh-Hant", "zh-Hans", "ja", "ko"],
     detection: {
       order: ["localStorage", "navigator"],
